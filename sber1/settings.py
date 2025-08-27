@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from urllib.parse import urlparse
+import dj_database_url
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -88,45 +89,21 @@ TEMPLATES = [
 WSGI_APPLICATION = "sber1.wsgi.application"
 
 # -------- Database --------
-# Позволим использовать готовый DATABASE_URL (postgres://...), иначе — fallback к локальному
-DATABASE_URL = os.environ.get("DATABASE_URL")
-if DATABASE_URL:
-    # Для простоты используем dj_database_url, если добавите в requirements:
-    # import dj_database_url
-    # DATABASES = {"default": dj_database_url.parse(DATABASE_URL, conn_max_age=600)}
-    # Временно парсим вручную только Postgres:
-    from urllib.parse import urlparse as _u
+# Работает как в проде (DATABASE_URL из окружения), так и локально (дефолт).
+import dj_database_url
 
-    _p = _u(DATABASE_URL)
-    DB_NAME = _p.path.lstrip("/")
-    DB_USER = _p.username
-    DB_PASSWORD = _p.password
-    DB_HOST = _p.hostname
-    DB_PORT = _p.port or "5432"
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": DB_NAME,
-            "USER": DB_USER,
-            "PASSWORD": DB_PASSWORD,
-            "HOST": DB_HOST,
-            "PORT": DB_PORT,
-        }
-    }
-else:
-    # локальный fallback
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.environ.get("DB_NAME", "cber"),
-            "USER": os.environ.get("DB_USER", "postgres"),
-            "PASSWORD": os.environ.get("DB_PASSWORD", "postgres"),
-            "HOST": os.environ.get("DB_HOST", "localhost"),
-            "PORT": os.environ.get("DB_PORT", "5432"),
-            # Если нужен search_path, можно передать через DB_OPTIONS
-            "OPTIONS": {},
-        }
-    }
+DATABASES = {
+    "default": dj_database_url.config(
+        # дефолт на случай, если переменная не задана локально
+        default=os.environ.get(
+            "DATABASE_URL",
+            "postgres://postgres:postgres@localhost:5432/cber"
+        ),
+        conn_max_age=600,            # пул соединений
+        conn_health_checks=True,     # проверка соединений
+    )
+}
+
 
 # -------- Password validators --------
 AUTH_PASSWORD_VALIDATORS = [
