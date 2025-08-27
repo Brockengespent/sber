@@ -1,0 +1,7 @@
+Django>=4.2,<5.3
+gunicorn>=21.2
+whitenoise[brotli]>=6.6
+psycopg2-binary>=2.9
+djangorestframework>=3.14
+# dj-database-url можно раскомментировать и использовать вместо ручного парсинга DATABASE_URL:
+# dj-database-url>=2.2

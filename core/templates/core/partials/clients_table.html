@@ -1,0 +1,57 @@
+{% load humanize %}
+<div class="card shadow-sm">
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>Клиент</th>
+          <th class="text-end">Общий долг (₽)</th>
+          <th>Просрочка</th>
+          <th>Город</th>
+          <th>Флаг</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if results %}
+          {% for r in results %}
+            <tr>
+              <td class="mono">
+                <a href="{% url 'client-detail' r.id %}" class="text-decoration-none">
+                  {{ r.client_id }}
+                </a>
+              </td>
+              <td class="text-end">
+                {% if r.total_debt is not None %}
+                  {{ r.total_debt|floatformat:0|intcomma }} ₽
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+              <td>{{ r.overdue_bucket|default:"—" }}</td>
+              <td>{{ r.city|default:"—" }}</td>
+              <td>{% if r.npl_nflag %}<span class="badge text-bg-danger">NPL</span>{% else %}—{% endif %}</td>
+            </tr>
+          {% endfor %}
+        {% else %}
+          <tr>
+            <td colspan="5" class="text-center py-4 text-muted">Нет данных</td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="d-flex justify-content-between align-items-center mt-2">
+  <div class="text-muted">Всего: {{ count|default:0|intcomma }}</div>
+  <div class="btn-group">
+    {% if previous %}
+      <button class="btn btn-outline-secondary"
+              hx-get="{{ previous }}" hx-target="#clients-table" hx-push-url="true">← Назад</button>
+    {% endif %}
+    {% if next %}
+      <button class="btn btn-outline-secondary"
+              hx-get="{{ next }}" hx-target="#clients-table" hx-push-url="true">Вперёд →</button>
+    {% endif %}
+  </div>
+</div>

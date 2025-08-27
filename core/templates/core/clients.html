@@ -1,0 +1,188 @@
+{% extends "core/_base.html" %}
+{% load static %}
+
+{% block title %}Все клиенты{% endblock %}
+
+{% block head %}
+  <style>
+    .page-title { font-weight: 700; }
+    .htmx-indicator { display: none; }
+    .htmx-request .htmx-indicator { display: inline-block; }
+  </style>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+{% endblock %}
+
+{% block body %}
+  <!-- Навигация и крошки в стиле client_detail -->
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <div class="d-flex align-items-center gap-2">
+      <a href="{% url 'index' %}" class="btn btn-outline-secondary btn-sm">← На главную</a>
+      <nav aria-label="breadcrumb">
+        <ol class="breadcrumb mb-0">
+          <li class="breadcrumb-item"><a href="{% url 'index' %}">Главная</a></li>
+          <li class="breadcrumb-item active mono" aria-current="page">Клиенты</li>
+        </ol>
+      </nav>
+    </div>
+    <div class="d-flex align-items-center gap-2">
+      <a href="{% url 'upload_multi' %}" class="btn btn-outline-primary btn-sm">📤 Загрузка данных</a>
+    </div>
+  </div>
+
+  <h1 class="page-title mb-3">👥 Все клиенты</h1>
+
+  <div class="row g-4">
+    <!-- Левая колонка: фильтры -->
+    <div class="col-lg-4">
+      <div class="card shadow-sm h-100">
+        <div class="card-header">
+          <div class="fw-semibold">Фильтры</div>
+        </div>
+        <div class="card-body">
+          <form id="filters" class="d-grid gap-3">
+            <div>
+              <label class="form-label">Долг от (₽)</label>
+              <input id="inp-debt-min" type="number" step="1" min="0" class="form-control" name="debt_min" placeholder="0">
+            </div>
+
+            <div>
+              <label class="form-label">Долг до (₽)</label>
+              <input id="inp-debt-max" type="number" step="1" min="0" class="form-control" name="debt_max" placeholder="1000000">
+            </div>
+
+            <div>
+              <label class="form-label">Просрочка</label>
+              <select class="form-select" name="bucket" id="bucket-select" multiple></select>
+              <div class="form-text">Удерживайте Cmd/Ctrl для множественного выбора</div>
+            </div>
+
+            <div>
+              <label class="form-label">Город</label>
+              <select class="form-select" name="city" id="city-select">
+                <option value="">Все города</option>
+                {% if cities %}
+                  {% for c in cities %}
+                    <option value="{{ c }}" {% if c == selected_city %}selected{% endif %}>{{ c }}</option>
+                  {% endfor %}
+                {% endif %}
+              </select>
+            </div>
+
+            <div class="d-flex gap-2">
+              <!-- Применить фильтры -->
+              <button type="button"
+                      class="btn btn-primary"
+                      hx-get="{% url 'clients_table' %}"
+                      hx-target="#clients-table"
+                      hx-include="#filters"
+                      hx-indicator="#loading">
+                Применить фильтры
+              </button>
+
+              <!-- Мгновенный сброс -->
+              <button id="reset-btn" type="reset"
+                      class="btn btn-outline-secondary"
+                      hx-get="{% url 'clients_table' %}"
+                      hx-target="#clients-table"
+                      hx-vals="{}"
+                      hx-indicator="#loading"
+                      hx-trigger="click">
+                Сбросить
+              </button>
+            </div>
+
+            <div id="loading" class="htmx-indicator">Загрузка…</div>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <!-- Правая колонка: таблица -->
+    <div class="col-lg-8">
+      <div class="card shadow-sm">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <div class="fw-semibold">Таблица клиентов</div>
+          <div class="d-flex gap-2">
+            <button class="btn btn-sm btn-outline-dark"
+                    hx-get="{% url 'clients_table' %}?ordering=-total_debt"
+                    hx-target="#clients-table"
+                    hx-include="#filters"
+                    hx-indicator="#loading">
+              Долг по убыванию
+            </button>
+            <button class="btn btn-sm btn-outline-dark"
+                    hx-get="{% url 'clients_table' %}?ordering=total_debt"
+                    hx-target="#clients-table"
+                    hx-include="#filters"
+                    hx-indicator="#loading">
+              Долг по возрастанию
+            </button>
+          </div>
+        </div>
+        <div class="card-body p-0">
+          <div id="clients-table"
+               hx-get="{% url 'clients_table' %}"
+               hx-trigger="load"
+               hx-indicator="#loading">
+            <!-- сюда подставится фрагмент core/partials/clients_table.html -->
+            <div class="p-3 text-muted">Загрузка таблицы…</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    document.addEventListener('DOMContentLoaded', async function () {
+      // 1) Подгрузка доступных бакетов
+      try {
+        const resp = await fetch("{% url 'clients_buckets' %}");
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        const buckets = Array.isArray(data.buckets) ? data.buckets : [];
+        const sel = document.getElementById('bucket-select');
+        sel.innerHTML = '';
+        buckets.forEach(b => {
+          const opt = document.createElement('option');
+          opt.value = b;
+          opt.textContent = b;
+          sel.appendChild(opt);
+        });
+      } catch (e) {
+        console.warn('Не удалось загрузить список бакетов просрочки', e);
+        const sel = document.getElementById('bucket-select');
+        if (sel && !sel.options.length) {
+          ['0', '180+'].forEach(b => {
+            const opt = document.createElement('option');
+            opt.value = b;
+            opt.textContent = b;
+            sel.appendChild(opt);
+          });
+        }
+      }
+
+      // 2) Полный визуальный сброс + мгновенная перезагрузка таблицы
+      const form = document.getElementById('filters');
+      const resetBtn = document.getElementById('reset-btn');
+      resetBtn.addEventListener('click', function () {
+        // стандартный сброс формы
+        form.reset();
+        // очистка мультиселектов и инпутов
+        form.querySelectorAll('select').forEach(sel => {
+          for (const opt of sel.options) opt.selected = false;
+          sel.selectedIndex = -1;
+        });
+        form.querySelectorAll('input[type="number"], input[type="text"]').forEach(inp => inp.value = '');
+
+        // мгновенная подгрузка таблицы без фильтров
+        htmx.ajax('GET', "{% url 'clients_table' %}", {
+          target: '#clients-table',
+          indicator: '#loading',
+          values: {},
+        });
+      });
+    });
+  </script>
+{% endblock %}

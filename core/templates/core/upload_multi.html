@@ -1,0 +1,64 @@
+{% extends "core/_base.html" %}
+{% block title %}Загрузка данных (5 файлов){% endblock %}
+
+{% block body %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <div class="d-flex align-items-center gap-2">
+    <a class="btn btn-sm btn-outline-secondary"
+       href="{{ request.META.HTTP_REFERER|default:'/clients/' }}"
+       onclick="if (history.length > 1) { history.back(); return false; }">
+      ← Назад
+    </a>
+    <h1 class="h4 mb-0">Загрузка данных (Cs, C, Tr, So, Dog)</h1>
+  </div>
+  <div class="d-flex gap-2">
+    <a class="btn btn-sm btn-outline-secondary" href="{% url 'download-template-cs' %}">Шаблон Cs</a>
+    <a class="btn btn-sm btn-outline-secondary" href="{% url 'download-template-c' %}">Шаблон C</a>
+    <a class="btn btn-sm btn-outline-secondary" href="{% url 'download-template-tr' %}">Шаблон Tr</a>
+    <a class="btn btn-sm btn-outline-secondary" href="{% url 'download-template-so' %}">Шаблон So</a>
+    <a class="btn btn-sm btn-outline-secondary" href="{% url 'download-template-dog' %}">Шаблон Dog</a>
+  </div>
+</div>
+
+<form method="post" enctype="multipart/form-data" class="card p-3 shadow-sm">
+  {% csrf_token %}
+  <div class="row g-3">
+    <div class="col-md-6">
+      <label class="form-label">Файл Cs (гео‑ивенты)</label>
+      <input class="form-control" type="file" name="file_cs" accept=".xlsx,.xls">
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Файл C (поступления)</label>
+      <input class="form-control" type="file" name="file_c" accept=".xlsx,.xls">
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Файл Tr (транзакции)</label>
+      <input class="form-control" type="file" name="file_tr" accept=".xlsx,.xls">
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Файл So (операции)</label>
+      <input class="form-control" type="file" name="file_so" accept=".xlsx,.xls">
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Файл Dog (портфель)</label>
+      <input class="form-control" type="file" name="file_dog" accept=".xlsx,.xls">
+    </div>
+    <div class="col-12">
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" id="clear" name="clear" value="1">
+        <label for="clear" class="form-check-label">Очистить выбранные таблицы перед загрузкой</label>
+      </div>
+    </div>
+    <div class="col-12">
+      <button class="btn btn-primary">Загрузить</button>
+    </div>
+  </div>
+</form>
+
+{% if messages %}
+  <div class="card mt-3 p-3">
+    <h6 class="mb-2">Результаты</h6>
+    <pre class="small mb-0">{{ messages|join:"\n" }}</pre>
+  </div>
+{% endif %}
+{% endblock %}

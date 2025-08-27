@@ -1,0 +1,658 @@
+{% extends "core/_base.html" %}
+{% load humanize %}
+
+{% block title %}Клиент {{ obj.id }}{% endblock %}
+
+{% block body %}
+<style>
+  /* Общие утилиты */
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+  .muted { color: #6c757d; }
+  .kpi { background:#f8f9fa; border:1px solid #eceff3; border-radius:10px; padding:12px 14px; }
+  .chip { display:inline-block; padding:4px 8px; border-radius:999px; background:#f1f3f5; font-size:12px; }
+  .chip.ok { background:#e9f7ef; color:#13795b; }
+  .chip.bad { background:#fdecea; color:#d33c2d; }
+
+  .card { border-radius:12px; }
+  .card-header { background:#fff; border-bottom:1px solid #eef1f4; }
+  .card-body { background:#fff; }
+
+  .scroll-y { overflow-y:auto; }
+  .scroll-x { overflow-x:auto; white-space:nowrap; }
+
+  /* Топ источники — компактный скролл */
+  .top-sources-wrap {
+    max-height: 110px;
+    overflow-y: auto;
+    padding-right: 6px;
+  }
+  .top-sources-item {
+    display:block;
+    padding:6px 10px;
+    border:1px solid #eceff3;
+    border-radius:8px;
+    background:#f8f9fa;
+    font-size:13px;
+  }
+
+  /* Правый блок: общий скролл внутри карточки, фиксируем высоту под вьюпорт */
+  .spend-card {
+    display:flex;
+    flex-direction:column;
+    height: calc(100vh - 260px); /* подстраиваем под шапку/отступы страницы */
+    min-height: 420px;
+  }
+  .spend-card-header {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background:#fff;
+    border-bottom:1px solid #eef1f4;
+  }
+  .spend-card-body {
+    overflow-y: auto; /* общий скролл для всего содержимого блока справа */
+    padding: 1rem 1rem 0.75rem 1rem;
+  }
+
+  .table-sm th, .table-sm td { padding: 0.4rem 0.6rem; }
+  .hide { display:none !important; }
+
+  /* LLM/списки: доп.оформление и фикса для размеров */
+  .top-sources-item{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    padding:6px 10px;
+    border:1px solid #eceff3;
+    border-radius:8px;
+    background:#f8f9fa;
+    font-size:13px;
+  }
+  .top-merchants-wrap{
+    max-height:360px;   /* было 240px */
+    min-height:220px;   /* чтобы не сжималось до 1–2 строк */
+    overflow-y:auto;
+    border:1px solid #eef1f4;
+    border-radius:8px;
+  }
+  .top-merchants-item{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    padding:8px 12px;   /* было 10px */
+    border-bottom:1px solid #f1f3f5;
+    font-size:14px;
+  }
+  .top-merchants-item:last-child{border-bottom:none;}
+
+
+</style>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <div class="d-flex align-items-center gap-2">
+    <a href="/clients/" class="btn btn-outline-secondary btn-sm">← Ко всем клиентам</a>
+    <nav aria-label="breadcrumb">
+      <ol class="breadcrumb mb-0">
+        <li class="breadcrumb-item"><a href="/clients/">Клиенты</a></li>
+        <li class="breadcrumb-item active mono" aria-current="page">#{{ obj.id }}</li>
+      </ol>
+    </nav>
+  </div>
+  <div class="d-flex align-items-center gap-2">
+    <a class="btn btn-outline-secondary btn-sm{% if period == '7d' %} active{% endif %}" href="?period=7d">7д</a>
+    <a class="btn btn-outline-secondary btn-sm{% if period == '30d' %} active{% endif %}" href="?period=30d">30д</a>
+    <a class="btn btn-outline-secondary btn-sm{% if period == '90d' %} active{% endif %}" href="?period=90d">90д</a>
+    <a class="btn btn-outline-secondary btn-sm{% if period == 'all' %} active{% endif %}" href="?period=all">Всё</a>
+  </div>
+</div>
+
+<!-- Сводка по клиенту -->
+<div class="card shadow-sm mb-4">
+  <div class="card-body p-4">
+    <div class="row g-4 align-items-center">
+      <div class="col-lg-7">
+        <h1 class="h4 mb-2">
+          Клиент <span class="mono">{{ obj.ac_client_hash }}</span>
+        </h1>
+        <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+          <span class="badge rounded-pill text-bg-light">PK: {{ obj.id }}</span>
+          {% if obj.npl_nflag %}
+            <span class="chip bad">NPL</span>
+          {% else %}
+            <span class="chip ok">NPL: нет</span>
+          {% endif %}
+          {% if obj.overdue_bucket_name %}
+            <span class="chip">Просрочка: {{ obj.overdue_bucket_name }}</span>
+          {% endif %}
+          {% if city %}
+            <span class="chip">Город: {{ city }}</span>
+          {% endif %}
+        </div>
+        <div class="muted small">Период: {{ period|default:"30д" }}</div>
+      </div>
+      <div class="col-lg-5">
+        <div class="row g-3">
+          <div class="col-6">
+            <div class="kpi">
+              <div class="muted small">Общий долг</div>
+              <div class="h5 mb-0">{{ obj.debt_tot_os_rub_amt|floatformat:0|intcomma }} ₽</div>
+            </div>
+          </div>
+          <div class="col-6">
+            <div class="kpi">
+              <div class="muted small">Просрочка</div>
+              <div class="h5 mb-0">{{ obj.overdue_bucket_name|default:"—" }}</div>
+            </div>
+          </div>
+          <div class="col-12 d-flex gap-2">
+            <a href="{% url 'client-heatmap' obj.id %}" class="btn btn-primary">Тепловая карта</a>
+            <a href="#llm" class="btn btn-secondary">Контакт/визит</a>
+            <a href="/clients/" class="btn btn-outline-secondary">← Ко всем клиентам</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Контент -->
+<div class="row g-4">
+
+  <!-- LLM — поднято под навигацию -->
+<div class="card shadow-sm mb-4" id="llm">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <div class="fw-semibold">Рекомендация контакта (LLM)</div>
+    <div class="d-flex align-items-center gap-2">
+      <select id="llm-period" class="form-select form-select-sm" style="width:auto;">
+        <option value="7d" {% if period == '7d' %}selected{% endif %}>7д</option>
+        <option value="30d" {% if period == '30d' %}selected{% endif %}>30д</option>
+        <option value="90d" {% if period == '90d' %}selected{% endif %}>90д</option>
+        <option value="all" {% if period == 'all' %}selected{% endif %}>Всё</option>
+      </select>
+      <button class="btn btn-sm btn-outline-secondary" id="llm-refresh">Предложить встречу</button>
+      <button class="btn btn-sm btn-outline-secondary" disabled>Создать задачу</button>
+    </div>
+  </div>
+  <div class="card-body">
+    <div id="llm-error" class="text-danger mb-2" style="display:none;"></div>
+    <div id="llm-loading" class="muted" style="display:none;">Загрузка…</div>
+
+    <div id="llm-results" style="display:none;">
+      <div class="row g-3">
+        <div class="col-md-6">
+          <div class="kpi">
+            <div class="muted small">Оптимальное время</div>
+            <div class="h5 mb-0" id="llm-best-time">—</div>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="kpi">
+            <div class="muted small">Рекомендуемое место</div>
+            <div class="h5 mb-0" id="llm-best-place">—</div>
+          </div>
+        </div>
+        <div class="col-12">
+          <div class="muted small mb-1">Слоты</div>
+          <div id="llm-appointments"></div>
+        </div>
+        <div class="col-12">
+          <div class="muted small mb-1">Альтернативы</div>
+          <div id="llm-alternatives"></div>
+        </div>
+        <div class="col-12">
+          <div class="muted small">Комментарий</div>
+          <p class="mb-0" id="llm-comment">—</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+  <!-- Поступления -->
+  <div class="col-lg-8">
+    <div class="card shadow-sm h-100">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <div class="fw-semibold">Поступления на карту</div>
+        <button class="btn btn-sm btn-outline-secondary hide">Экспорт</button>
+      </div>
+      <div class="card-body">
+        <ul class="nav nav-tabs mb-3" role="tablist">
+          <li class="nav-item" role="presentation">
+            <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#inc-summary" type="button" role="tab">
+              Сводка
+            </button>
+          </li>
+          {# вкладка "Транзакции" удалена #}
+        </ul>
+
+        <div class="tab-content">
+          <div class="tab-pane fade show active" id="inc-summary" role="tabpanel">
+            <div class="row g-3">
+              <div class="col-md-4">
+                <div class="kpi">
+                  <div class="muted small">За период</div>
+                  <div class="h5 mb-0">
+                    {% if inc_total %}{{ inc_total|floatformat:0|intcomma }} ₽{% else %}—{% endif %}
+                  </div>
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="kpi">
+                  <div class="muted small">Средняя/неделя</div>
+                  <div class="h5 mb-0">
+                    {% if inc_avg_week %}{{ inc_avg_week|floatformat:0|intcomma }} ₽{% else %}—{% endif %}
+                  </div>
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="kpi">
+                  <div class="muted small">Количество</div>
+                  <div class="h5 mb-0">{{ inc_count|default_if_none:"—" }}</div>
+                </div>
+              </div>
+
+              <div class="col-md-4">
+                <div class="kpi">
+                  <div class="muted small">Пик день</div>
+                  <div class="h6 mb-0">
+                    {% if inc_peak_day %}{{ inc_peak_day|date:"d.m.Y" }} — {{ inc_peak_amt|floatformat:0|intcomma }} ₽{% else %}—{% endif %}
+                  </div>
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="kpi">
+                  <div class="muted small">Медиана / P90</div>
+                  <div class="h6 mb-0">
+                    {% if inc_median %}{{ inc_median|floatformat:0|intcomma }} ₽{% else %}—{% endif %}
+                    /
+                    {% if inc_p90 %}{{ inc_p90|floatformat:0|intcomma }} ₽{% else %}—{% endif %}
+                  </div>
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="kpi">
+                  <div class="muted small">Активные дни / Макс. пауза</div>
+                  <div class="h6 mb-0">{{ inc_active_days|default:0 }} дн / {{ inc_max_gap_days|default:0 }} дн</div>
+                </div>
+              </div>
+
+              <div class="col-12">
+                <div class="muted small mb-1">Топ источники</div>
+                {% if inc_top_sources %}
+                  <div class="top-sources-wrap" style="max-height:none;">
+                    <div class="d-flex flex-column gap-2 w-100">
+                      {% for s in inc_top_sources %}
+                        <span class="top-sources-item">
+                          <span class="text-truncate" style="max-width:70%;" title="{{ s.name|default:'—' }}">{{ s.name|default:"—" }}</span>
+                          <span class="fw-semibold">
+                            {{ s.amount|floatformat:0|intcomma }} ₽
+                            <span class="muted">({{ s.share|floatformat:1 }}%)</span>
+                          </span>
+                        </span>
+                      {% endfor %}
+                    </div>
+                  </div>
+                {% else %}
+                  <div class="text-muted small">Нет источников за период</div>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+          {# tab-pane с таблицей поступлений (inc-table) удалён полностью #}
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- Траты + Топ мерчантов (с общим скроллом) -->
+  <div class="col-lg-4">
+    <div class="card shadow-sm spend-card">
+      <div class="card-header spend-card-header d-flex justify-content-between align-items-center">
+        <div class="fw-semibold">Траты по карте</div>
+        <div class="hide">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="normalizeSwitch">
+            <label class="form-check-label small" for="normalizeSwitch">Нормировать</label>
+          </div>
+        </div>
+      </div>
+
+      <div class="spend-card-body">
+        <div class="row g-3 mb-3">
+          <div class="col-12">
+            <div class="kpi">
+              <div class="muted small">Расходы / Операций</div>
+              <div class="h6 mb-0">
+                {{ spend_total|floatformat:0|intcomma }} ₽
+                <span class="text-muted">/ {{ spend_count|default:0 }}</span>
+              </div>
+            </div>
+          </div>
+          <div class="col-6">
+            <div class="kpi">
+              <div class="muted small">Средний чек</div>
+              <div class="h6 mb-0">{{ avg_check|floatformat:0|intcomma }} ₽</div>
+            </div>
+          </div>
+          <div class="col-6">
+            <div class="kpi">
+              <div class="muted small">Пик день</div>
+              <div class="h6 mb-0">
+                {% if weekday_peak %}{{ weekday_peak }} ({{ weekday_peak_share|floatformat:1 }}%){% else %}—{% endif %}
+              </div>
+            </div>
+          </div>
+          <div class="col-6">
+            <div class="kpi">
+              <div class="muted small">Гео указано</div>
+              <div class="h6 mb-0">{{ geo_share|floatformat:0 }}%</div>
+            </div>
+          </div>
+          <div class="col-6">
+            <div class="kpi">
+              <div class="muted small">Топ город</div>
+              <div class="h6 mb-0">{{ top_city|default:"—" }}</div>
+            </div>
+          </div>
+          <div class="col-12">
+            <div class="kpi">
+              <div class="muted small">ATM</div>
+              <div class="h6 mb-0">
+                {{ atm_sum|floatformat:0|intcomma }} ₽
+                <span class="text-muted">({{ atm_share|floatformat:1 }}%)</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mb-1 muted small">Топ мерчанты (5)</div>
+        <div class="top-merchants-wrap">
+          {% if top_merchants %}
+            {% for m in top_merchants %}
+              <div class="top-merchants-item">
+                <span class="text-truncate" style="max-width: 70%;" title="{{ m.name|default:'Неизвестный мерчант' }}">
+                  {{ m.name|default:"Неизвестный мерчант" }}
+                </span>
+                <span class="fw-semibold">{{ m.amount|floatformat:0|intcomma }} ₽</span>
+              </div>
+            {% endfor %}
+          {% else %}
+            <div class="text-muted text-center py-3">Нет данных</div>
+          {% endif %}
+        </div>
+
+        {% if out_total %}
+          <div class="mt-2 text-muted small">Доля считается от {{ out_total|floatformat:0|intcomma }} ₽ списаний за период</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Транзакции по карте -->
+  <div class="col-12">
+    <div class="card shadow-sm">
+      <div class="card-header d-flex flex-wrap align-items-end gap-2">
+        <div class="fw-semibold me-auto">Транзакции по карте</div>
+        <form method="get" class="d-flex flex-wrap align-items-end gap-2">
+          <input type="hidden" name="period" value="{{ period }}">
+          <input type="hidden" name="tx_page" value="1">
+
+          <div>
+            <label class="form-label mb-1">Тип транзакции</label>
+            <select class="form-select form-select-sm" name="tx_direction">
+              <option value="" {% if not tx_direction %}selected{% endif %}>Все</option>
+              <option value="C" {% if tx_direction == 'C' %}selected{% endif %}>Поступления</option>
+              <option value="D" {% if tx_direction == 'D' %}selected{% endif %}>Оплаты</option>
+            </select>
+          </div>
+
+          <div>
+            <label class="form-label mb-1">Сортировка по дате</label>
+            <select class="form-select form-select-sm" name="tx_date_ordering">
+              <option value="-date" {% if tx_date_ordering == '-date' %}selected{% endif %}>Новые сверху</option>
+              <option value="date" {% if tx_date_ordering == 'date' %}selected{% endif %}>Старые сверху</option>
+            </select>
+          </div>
+
+          <div>
+            <label class="form-label mb-1">На странице</label>
+            <select class="form-select form-select-sm" name="tx_page_size">
+              <option value="20" {% if tx_page_size|default:50 == 20 %}selected{% endif %}>20</option>
+              <option value="50" {% if tx_page_size|default:50 == 50 %}selected{% endif %}>50</option>
+              <option value="100" {% if tx_page_size|default:50 == 100 %}selected{% endif %}>100</option>
+            </select>
+          </div>
+
+          <div>
+            <button class="btn btn-sm btn-primary" type="submit">Применить</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="card-body p-0">
+        <div class="table-responsive">
+          <table class="table table-sm table-striped mb-0">
+            <thead class="table-light">
+              <tr>
+                <th style="width: 200px;">Дата/время</th>
+                <th class="text-end" style="width: 160px;">Сумма</th>
+                <th style="width: 200px;">Город</th>
+                <th>Мерчант</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% if tx_rows %}
+                {% for t in tx_rows %}
+                  <tr>
+                    <td class="text-nowrap">{{ t.c_txn_dt|date:"d.m.Y H:i" }}</td>
+                    <td class="text-end">
+                      {% if t.c_txn_rub_amt %}
+                        {% if t.direction == 'C' %}+{% elif t.direction == 'D' %}-{% endif %}
+                        {{ t.c_txn_rub_amt|floatformat:0|intcomma }} ₽
+                      {% else %}—{% endif %}
+                    </td>
+
+                    <td class="text-truncate" style="max-width:180px;" title="{{ t.t_trx_city|default:'—' }}">{{ t.t_trx_city|default:"—" }}</td>
+                    <td class="text-truncate" style="max-width:300px;"
+                        title="{{ t.merchant_display|default:'—' }}">
+                      {{ t.merchant_display|default:"—" }}
+                    </td>
+
+                  </tr>
+                {% endfor %}
+              {% else %}
+                <tr><td colspan="4" class="text-center text-muted py-4">Нет транзакций за выбранный период/фильтры</td></tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card-footer d-flex justify-content-between">
+        {% if tx_prev %}
+          <a class="btn btn-sm btn-outline-secondary" href="{{ tx_prev }}">« Назад</a>
+        {% else %}
+          <span></span>
+        {% endif %}
+        {% if tx_next %}
+          <a class="btn btn-sm btn-outline-secondary" href="{{ tx_next }}">Вперёд »</a>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+    const btn       = document.getElementById('llm-refresh');
+    const sel       = document.getElementById('llm-period');
+    const loading   = document.getElementById('llm-loading');
+    const err       = document.getElementById('llm-error');
+    const results   = document.getElementById('llm-results');
+    const apps      = document.getElementById('llm-appointments');
+    const alts      = document.getElementById('llm-alternatives');
+    const bestTime  = document.getElementById('llm-best-time');
+    const bestPlace = document.getElementById('llm-best-place');
+    const comment   = document.getElementById('llm-comment');
+
+    // Форматирование дат YYYY-MM-DD -> DD.MM.YYYY
+    function fmtDateISO(d) {
+        if (!d) return null;
+        try {
+            const [Y, M, D] = d.split('-').map(Number);
+            if (!Y || !M || !D) return null;
+            return `${String(D).padStart(2, '0')}.${String(M).padStart(2, '0')}.${Y}`;
+        } catch {
+            return null;
+        }
+    }
+
+    // Форматирование одного слота встречи
+    function fmtSlot(s) {
+        if (!s) return '';
+
+        const label = s.label || (
+            s.place_type === 'home' ? 'Дом' :
+            s.place_type === 'work' ? 'Работа' : 'Место'
+        );
+
+        const dStr  = s.date  || '';
+        const start = s.start || '';
+        const end   = s.end   || '';
+
+        const when = [
+            dStr,
+            (start && end) ? `${start}–${end}` : (start || end)
+        ].filter(Boolean).join(' ');
+
+        const coords = (s.lat != null && s.lon != null)
+            ? `(${Number(s.lat).toFixed(4)}, ${Number(s.lon).toFixed(4)})`
+            : '';
+
+        const radius = s.radius_m
+            ? `, радиус ${s.radius_m}м`
+            : '';
+
+        const conf = (s.confidence != null)
+            ? `, доверие ${(Number(s.confidence) * 100).toFixed(0)}%`
+            : '';
+
+        const reason = s.reason
+            ? ` — ${s.reason}`
+            : '';
+
+        return `
+            <div class="llm-slot">
+                <div>
+                    <span class="llm-badge">${label}</span>
+                    <b>${when || 'Дата/время уточняются'}</b>
+                </div>
+                <div class="muted">${coords}${radius}${conf}${reason}</div>
+            </div>
+        `;
+    }
+
+    // Запрос к API
+    async function run() {
+        err.style.display     = 'none';
+        results.style.display = 'none';
+        loading.style.display = 'inline';
+
+        try {
+            const payload = {
+                client_id: '{{ obj.ac_client_hash }}',
+                period: sel?.value || '{{ period|default:"30d" }}'
+            };
+
+            const resp = await fetch('/api/llm/plan_meeting/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const data = await resp.json();
+
+            if (!resp.ok) {
+                throw new Error(
+                    typeof data === 'object'
+                        ? (data.detail || JSON.stringify(data))
+                        : String(data)
+                );
+            }
+
+            // Слоты встреч и альтернатив
+            const a = Array.isArray(data.appointments) ? data.appointments : [];
+            const b = Array.isArray(data.alternatives) ? data.alternatives : [];
+
+            apps.innerHTML = a.length
+                ? a.map(fmtSlot).join('')
+                : '<div class="muted">Слотов нет</div>';
+
+            alts.innerHTML = b.length
+                ? b.map(fmtSlot).join('')
+                : '<div class="muted">Альтернатив нет</div>';
+
+            // Лучшая встреча
+            if (a.length) {
+                const best = a || {};
+
+                const dStr   = fmtDateISO(best.date);
+                const tStart = best.start || null;
+                const tEnd   = best.end   || null;
+
+                let when = 'Дата/время уточняются';
+                if (dStr && tStart && tEnd)       when = `${dStr} ${tStart}–${tEnd}`;
+                else if (dStr && (tStart || tEnd)) when = `${dStr} ${tStart || ''}${tEnd ? `–${tEnd}` : ''}`.trim();
+                else if (dStr)                     when = `${dStr} (время уточняется)`;
+
+                bestTime.textContent = when;
+
+                const label = best.label || (
+                    best.place_type === 'home' ? 'Дом' :
+                    best.place_type === 'work' ? 'Работа' : 'Место'
+                );
+
+                const lat = (typeof best.lat === 'number') ? best.lat.toFixed(4) : '';
+                const lon = (typeof best.lon === 'number') ? best.lon.toFixed(4) : '';
+
+                bestPlace.textContent = [label, (lat && lon) ? `${lat} ${lon}` : '']
+                    .filter(Boolean).join(' ');
+
+                comment.textContent = best.reason || (
+                    data.need_clarification
+                        ? 'Нужно уточнение района/времени.'
+                        : '—'
+                );
+            } else {
+                bestTime.textContent  = 'Дата/время уточняются';
+                bestPlace.textContent = '—';
+                comment.textContent   = data.need_clarification
+                    ? 'Нужно уточнение района/времени.'
+                    : '—';
+            }
+
+            results.style.display = 'block';
+        } catch (e) {
+            err.textContent    = 'Ошибка: ' + (e?.message || e);
+            err.style.display  = 'block';
+        } finally {
+            loading.style.display = 'none';
+        }
+    }
+
+    // Привязки событий
+    btn?.addEventListener('click', run);
+
+    window.addEventListener('DOMContentLoaded', () => {
+        const current = '{{ period|default:"30d" }}';
+        const opt     = document.querySelector(`#llm-period option[value="${current}"]`);
+        if (opt) opt.selected = true;
+    });
+})();
+</script>
+
+
+
+{% endblock %}

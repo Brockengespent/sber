@@ -1,0 +1,327 @@
+{% extends "core/_base.html" %}
+{% load static %}
+
+{% block title %}Тепловая карта: клиент {{ obj.id }}{% endblock %}
+
+{% block head %}
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <style>
+    .hw-home { font-size: 20px; }
+    .hw-work { font-size: 20px; }
+  </style>
+{% endblock %}
+
+{% block body %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <div class="d-flex align-items-center gap-2">
+    <a href="/clients/" class="btn btn-outline-secondary btn-sm">← Ко всем клиентам</a>
+    <nav aria-label="breadcrumb">
+      <ol class="breadcrumb mb-0">
+        <li class="breadcrumb-item"><a href="/clients/">Клиенты</a></li>
+        <li class="breadcrumb-item"><a href="{% url 'client-detail' obj.id %}">#{{ obj.id }}</a></li>
+        <li class="breadcrumb-item active mono" aria-current="page">Тепловая карта</li>
+      </ol>
+    </nav>
+  </div>
+  <div class="d-flex align-items-center gap-2">
+    <a class="btn btn-outline-secondary btn-sm{% if request.GET.period == '7d' %} active{% endif %}" href="?period=7d">7д</a>
+    <a class="btn btn-outline-secondary btn-sm{% if request.GET.period == '30d' %} active{% endif %}" href="?period=30d">30д</a>
+    <a class="btn btn-outline-secondary btn-sm{% if request.GET.period == '90d' %} active{% endif %}" href="?period=90d">90д</a>
+    <a class="btn btn-outline-secondary btn-sm{% if request.GET.period == 'all' %} active{% endif %}" href="?period=all">Всё</a>
+  </div>
+</div>
+
+<div class="row g-4">
+  <!-- Левая колонка: фильтры -->
+  <div class="col-lg-4">
+    <div class="card shadow-sm h-100">
+      <div class="card-header">
+        <div class="fw-semibold">Фильтры</div>
+      </div>
+      <div class="card-body">
+        <form id="filters" class="d-grid gap-3">
+          <input type="hidden" id="clientId" value="{{ obj.ac_client_hash }}"/>
+
+          <div>
+            <label class="form-label mb-1">Период (пресет)</label>
+            <select name="period" class="form-select">
+              <option value="">—</option>
+              <option value="7d" {% if request.GET.period == '7d' %}selected{% endif %}>7 дней</option>
+              <option value="30d" {% if request.GET.period == '30d' %}selected{% endif %}>30 дней</option>
+              <option value="90d" {% if request.GET.period == '90d' %}selected{% endif %}>90 дней</option>
+              <option value="all" {% if request.GET.period == 'all' %}selected{% endif %}>всё время</option>
+            </select>
+            <div class="form-text">Или укажи даты вручную ниже</div>
+          </div>
+
+          <div>
+            <label class="form-label mb-1">Период (с)</label>
+            <input type="datetime-local" name="datetime_from" class="form-control"/>
+          </div>
+
+          <div>
+            <label class="form-label mb-1">Период (по)</label>
+            <input type="datetime-local" name="datetime_to" class="form-control"/>
+          </div>
+
+          <div>
+            <label class="form-label mb-1">События (для теплокарты)</label>
+            <select name="events" class="form-select" multiple size="3">
+              <option value="Login Success" selected>Login Success</option>
+              <option value="Authorization Success">Authorization Success</option>
+              <option value="Start Auth Timer">Start Auth Timer</option>
+            </select>
+            <div class="form-text">Дом/работа всегда считаются только по входам (Login/Authorization)</div>
+          </div>
+
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="toggleHomeWork">
+            <label class="form-check-label" for="toggleHomeWork">Показывать дом/работу</label>
+          </div>
+
+          <div>
+            <label class="form-label mb-1">Лимит точек</label>
+            <input type="number" name="limit" class="form-control" value="20000" min="1000" max="100000"/>
+          </div>
+
+          <div class="d-flex gap-2">
+            <button type="submit" class="btn btn-primary">Применить</button>
+            <button type="button" id="resetBtn" class="btn btn-outline-secondary">Сброс</button>
+          </div>
+
+          <div id="meta" class="form-text"></div>
+          <div id="hwMeta" class="form-text"></div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Правая колонка: карта -->
+  <div class="col-lg-8">
+    <div class="card shadow-sm h-100">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <div class="fw-semibold">Тепловая карта активности</div>
+        <a href="{% url 'client-detail' obj.id %}" class="btn btn-sm btn-outline-secondary">← В карточку клиента</a>
+      </div>
+      <div class="card-body">
+        <div id="map" class="rounded" style="height:70vh;"></div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+  <script>
+    let map, heatLayer, homeMarker, workMarker;
+    const MAX_ZOOM = 19;
+
+    function initMap() {
+      map = L.map('map', { minZoom: 3, maxZoom: MAX_ZOOM })
+              .setView([55.751244, 37.618423], 10);
+
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: MAX_ZOOM,
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(map);
+
+      map.on('zoomend', () => {
+        if (!heatLayer) return;
+        const z = map.getZoom();
+        const opt = heatOptionsForZoom(z);
+        heatLayer.setOptions(opt);
+      });
+    }
+
+    function heatOptionsForZoom(z) {
+      if (z >= 18) return { radius: 10, blur: 8, maxZoom: 18 };
+      if (z >= 16) return { radius: 14, blur: 10, maxZoom: 18 };
+      return { radius: 18, blur: 12, maxZoom: 18 };
+    }
+
+    function buildHeatUrl() {
+      const params = new URLSearchParams();
+      const cid = document.getElementById('clientId')?.value;
+      if (cid) params.set('client_id', cid);
+
+      const form = document.getElementById('filters');
+      const fields = ['period','datetime_from','datetime_to','limit'];
+      for (const name of fields) {
+        const el = form.elements[name];
+        if (!el) continue;
+        const v = el.value;
+        if (v !== null && v !== '') params.set(name, v);
+      }
+
+      const evSel = form.elements['events'];
+      if (evSel && evSel.selectedOptions) {
+        Array.from(evSel.selectedOptions).forEach(opt => {
+          params.append('events', opt.value);
+        });
+      }
+
+      return '/api/geo/heatmap/?' + params.toString();
+    }
+
+    function buildHomeWorkUrl() {
+      const params = new URLSearchParams();
+      const cid = document.getElementById('clientId')?.value;
+      if (cid) params.set('client_id', cid);
+
+      const form = document.getElementById('filters');
+      const fields = ['period','datetime_from','datetime_to'];
+      for (const name of fields) {
+        const el = form.elements[name];
+        if (!el) continue;
+        const v = el.value;
+        if (v !== null && v !== '') params.set(name, v);
+      }
+
+      // Дом/работа на бэке всегда по Login/Authorization, events не передаём
+      return '/api/geo/homework/?' + params.toString();
+    }
+
+    function renderHeat(pts) {
+      const opt = heatOptionsForZoom(map.getZoom());
+      if (heatLayer) map.removeLayer(heatLayer);
+      heatLayer = L.heatLayer(pts, opt).addTo(map);
+    }
+
+    function clearHomeWork() {
+      if (homeMarker) { map.removeLayer(homeMarker); homeMarker = null; }
+      if (workMarker) { map.removeLayer(workMarker); workMarker = null; }
+      document.getElementById('hwMeta').textContent = '';
+    }
+
+    function renderHomeWork(home, work, features) {
+      clearHomeWork();
+      const show = document.getElementById('toggleHomeWork').checked;
+      if (!show) return;
+
+      const homeIcon = L.divIcon({ className: 'hw-home', html: '🏠', iconSize: [24,24], iconAnchor: [12,12] });
+      const workIcon = L.divIcon({ className: 'hw-work', html: '💼', iconSize: [24,24], iconAnchor: [12,12] });
+
+      let texts = [];
+
+      if (home && home.lat && home.lon) {
+        homeMarker = L.marker([home.lat, home.lon], { icon: homeIcon })
+          .bindPopup(`
+            <b>Дом (гипотеза)</b><br/>
+            Уверенность: ${(home.confidence*100).toFixed(0)}%<br/>
+            Наблюдений: ${home.size}<br/>
+            Последнее: ${home.last_seen ? new Date(home.last_seen).toLocaleString() : '—'}
+          `)
+          .addTo(map);
+        texts.push(`Дом: ${(home.confidence*100).toFixed(0)}%, ${home.size} наблюдений`);
+      }
+
+      if (work && work.lat && work.lon) {
+        workMarker = L.marker([work.lat, work.lon], { icon: workIcon })
+          .bindPopup(`
+            <b>Работа (гипотеза)</b><br/>
+            Уверенность: ${(work.confidence*100).toFixed(0)}%<br/>
+            Наблюдений: ${work.size}<br/>
+            Последнее: ${work.last_seen ? new Date(work.last_seen).toLocaleString() : '—'}
+          `)
+          .addTo(map);
+        texts.push(`Работа: ${(work.confidence*100).toFixed(0)}%, ${work.size} наблюдений`);
+      }
+
+      const f = features || {};
+      const counts = f.counts || {};
+      const hourly = f.hourly_activity || [];
+      const weekday = f.weekday_activity || [];
+
+      let peakHour = null, peakHourVal = -1;
+      hourly.forEach((v, h) => { if (v > peakHourVal) { peakHourVal = v; peakHour = h; } });
+
+      let peakDay = null, peakDayVal = -1;
+      weekday.forEach((v, d) => { if (v > peakDayVal) { peakDayVal = v; peakDay = d; } });
+
+      const dayNames = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];
+      const peakDayName = (peakDay !== null && peakDay !== undefined) ? dayNames[peakDay] : '—';
+
+      texts.push(`Событий: всего ${counts.total || 0}, ночь ${counts.night || 0}, рабочее ${counts.work || 0}`);
+      if (peakHour !== null) texts.push(`Пик часа: ${peakHour}:00`);
+      if (peakDay !== null) texts.push(`Пик дня: ${peakDayName}`);
+
+      document.getElementById('hwMeta').textContent = texts.join(' · ');
+    }
+
+    async function loadHeat(url) {
+      try {
+        const res = await fetch(url, { credentials: 'same-origin' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+
+        document.getElementById('meta').textContent =
+          `Точек: ${data.count || 0}` + (data.truncated ? ' (срезано по лимиту)' : '');
+
+        const pts = data.heat_points || [];
+        renderHeat(pts);
+
+        if (pts.length > 0) {
+          const latlngs = pts.map(p => L.latLng(p[0], p[1]));
+          const bounds = L.latLngBounds(latlngs);
+          if (bounds.isValid()) {
+            if (bounds.getNorthWest().equals(bounds.getSouthEast())) {
+              map.setView(bounds.getCenter(), 14);
+            } else {
+              map.fitBounds(bounds.pad(0.1));
+            }
+          }
+        }
+      } catch (err) {
+        document.getElementById('meta').textContent = 'Ошибка загрузки: ' + (err?.message || err);
+        console.error(err);
+      }
+    }
+
+    async function loadHomeWork(url) {
+      if (!document.getElementById('toggleHomeWork').checked) {
+        clearHomeWork();
+        return;
+      }
+      try {
+        const res = await fetch(url, { credentials: 'same-origin' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        renderHomeWork(data.home, data.work, data.features);
+      } catch (err) {
+        document.getElementById('hwMeta').textContent = 'Ошибка HW: ' + (err?.message || err);
+        console.error(err);
+      }
+    }
+
+    function resetForm() {
+      document.getElementById('filters').reset();
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      initMap();
+
+      const reloadAll = () => {
+        loadHeat(buildHeatUrl());
+        loadHomeWork(buildHomeWorkUrl());
+      };
+
+      reloadAll();
+
+      document.getElementById('filters').addEventListener('submit', (e) => {
+        e.preventDefault();
+        reloadAll();
+      });
+
+      document.getElementById('resetBtn').addEventListener('click', () => {
+        resetForm();
+        reloadAll();
+      });
+
+      document.getElementById('toggleHomeWork').addEventListener('change', () => {
+        loadHomeWork(buildHomeWorkUrl());
+      });
+    });
+  </script>
+{% endblock %}
