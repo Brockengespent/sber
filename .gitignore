@@ -1,0 +1,61 @@
+# Virtual envs
+venv/
+.venv/
+env/
+ENV/
+
+# Env files and secrets
+.env
+.env.*
+!.env.example
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS/editor clutter
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+.eggs/
+.pybuilder/
+*.manifest
+*.spec
+
+# Test/coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache/
+pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+# Django
+local_settings.py
+*.log
+db.sqlite3
+db.sqlite3-journal
+
+# Static & media (генерируются и не нужны в VCS)
+staticfiles/
+media/
+
+# Migrations (иногда игнорируют при прототипировании, обычно — коммитят)
+# */migrations/*.py
+# !*/migrations/__init__.py
+
+# Misc
+*.pot
+*.mo
