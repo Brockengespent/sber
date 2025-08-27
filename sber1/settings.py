@@ -93,16 +93,11 @@ WSGI_APPLICATION = "sber1.wsgi.application"
 import dj_database_url
 
 DATABASES = {
-    "default": dj_database_url.config(
-        # дефолт на случай, если переменная не задана локально
-        default=os.environ.get(
-            "DATABASE_URL",
-            "postgres://postgres:postgres@localhost:5432/cber"
-        ),
-        conn_max_age=600,            # пул соединений
-        conn_health_checks=True,     # проверка соединений
-    )
+    "default": dj_database_url.config(conn_max_age=600, conn_health_checks=True)
 }
+DATABASES["default"].setdefault("OPTIONS", {})
+DATABASES["default"]["OPTIONS"]["options"] = "-c search_path=cber_schema,public"
+
 
 
 # -------- Password validators --------
