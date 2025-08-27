@@ -6,3 +6,4 @@ djangorestframework>=3.14
 # dj-database-url можно раскомментировать и использовать вместо ручного парсинга DATABASE_URL:
 # dj-database-url>=2.2
 httpx>=0.27
+pydantic>=1.10,<2.0
