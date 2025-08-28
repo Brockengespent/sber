@@ -426,13 +426,13 @@
     if (!s) return '';
     const label = s.label || (s.place_type === 'home' ? 'Дом' : (s.place_type === 'work' ? 'Работа' : 'Место'));
     const dStr = s.date || '';
-    const start = s.start || '';
-    const end = s.end || '';
     const when = [dStr, (start && end) ? `${start}–${end}` : (start || end)].filter(Boolean).join(' ');
     const coords = (s.lat != null && s.lon != null) ? `(${Number(s.lat).toFixed(4)}, ${Number(s.lon).toFixed(4)})` : '';
     const radius = s.radius_m ? `, радиус ${s.radius_m}м` : '';
     const conf = (s.confidence != null) ? `, доверие ${(Number(s.confidence)*100).toFixed(0)}%` : '';
     const reason = s.reason ? ` — ${s.reason}` : '';
+    const start = (s.start && /^\d{2}:\d{2}$/.test(s.start)) ? s.start : '';
+    const end   = (s.end   && /^\d{2}:\d{2}$/.test(s.end))   ? s.end   : '';
     return `<div class="llm-slot"><div><span class="llm-badge">${label}</span><b>${when || 'Дата/время уточняются'}</b></div><div class="muted">${coords}${radius}${conf}${reason}</div></div>`;
   }
 

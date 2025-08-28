@@ -1,5 +1,6 @@
 # services/llm_local.py
 import os
+import re
 import json
 from datetime import date, timedelta
 from typing import Literal, List, Dict, Any
@@ -8,15 +9,41 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 # ========= ENV CONFIG =========
-LLM_API_URL = os.getenv("LLM_API_URL", "https://api.deepseek.com")
-LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
+LLM_API_URL = os.getenv("LLM_API_URL", "https://api.deepseek.com")  # DeepSeek OpenAI‑совместимый API [2]
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")                  # чат‑модель с JSON mode [1]
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "12"))
 LLM_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY") or ""
 
+# ========= HELPERS: time normalization =========
+_TIME_PATTERNS = [
+    re.compile(r"^\s*(\d{1,2}):(\d{1,2})\s*$"),
+    re.compile(r"^\s*(\d{1,2})[.\-](\d{1,2})\s*$"),
+    re.compile(r"^\s*(\d{2})(\d{2})\s*$"),
+]  # принимаем 9:5, 09-05, 0905 и т.п., приводим к HH:MM [3]
+
+def _normalize_hhmm(value: str) -> str:
+    if value is None:
+        raise ValueError("empty time")
+    v = str(value).strip()
+    if v == "" or v == "—":
+        raise ValueError("empty time")
+    for pat in _TIME_PATTERNS:
+        m = pat.match(v)
+        if m:
+            hh, mm = int(m.group(1)), int(m.group(2))
+            if 0 <= hh < 24 and 0 <= mm < 60:
+                return f"{hh:02d}:{mm:02d}"
+    digits = re.findall(r"\d+", v)
+    if len(digits) >= 2:
+        hh, mm = int(digits), int(digits[5])
+        if 0 <= hh < 24 and 0 <= mm < 60:
+            return f"{hh:02d}:{mm:02d}"
+    raise ValueError(f"invalid time format: {v}")  # попадёт в предварительную фильтрацию [4]
+
 # ========= MODELS =========
 class Evidence(BaseModel):
-    type: str      # "trx" | "login" | "geo"
-    when: str      # "вт 12:40–13:10"
+    type: str       # "trx" | "login" | "geo"
+    when: str       # "вт 12:40–13:10"
     details: str
 
 class Habit(BaseModel):
@@ -37,18 +64,16 @@ class Appointment(BaseModel):
     reason: str
     signals: List[str] = Field(default_factory=list)
 
-    @field_validator("start", "end")
+    @field_validator("date")
     @classmethod
-    def _hhmm(cls, v):
-        assert len(v) == 5 and v[13] == ":" and 0 <= int(v[:2]) < 24 and 0 <= int(v[3:]) < 60
+    def _iso_date(cls, v):
+        date.fromisoformat(v)  # строгая ISO‑проверка [4]
         return v
 
-
-    @field_validator("start", "end")
+    @field_validator("start", "end", mode="before")
     @classmethod
     def _hhmm(cls, v):
-        assert len(v) == 5 and v[2] == ":" and 0 <= int(v[:2]) < 24 and 0 <= int(v[3:]) < 60
-        return v
+        return _normalize_hhmm(v)  # нормализуем в HH:MM до проверки [3]
 
 class PlanResponseV2(BaseModel):
     appointments: List[Appointment] = Field(default_factory=list)
@@ -59,17 +84,35 @@ class PlanResponseV2(BaseModel):
 
 # ========= PROMPT RULES =========
 SYSTEM_RULES_V2 = (
-    "Ты планировщик встреч. Верни СТРОГО валидный json-объект без Markdown и без текста вне JSON. "
+    "Ты планировщик встреч. Верни строго json‑объект без Markdown и без текста вне JSON. "
     "Структура: {\"appointments\":[], \"habits\":[], \"constraints_used\":[], \"need_clarification\": bool, \"questions\": []}. "
-    "Используй только переданный контекст: гео-дом/работа, почасовая/по-дневная активность, шаблоны расходов (мерчанты/MCC), регулярные окна. "
-    "Дата YYYY-MM-DD, время HH:MM, 1–3 слота. Если данных мало/конфликтуют — need_clarification=true и заполни questions."
-)
+    "Дата строго YYYY-MM-DD, время строго HH:MM с ведущими нулями. Дай 1–3 слота. "
+    "Если данных мало/конфликтуют — need_clarification=true и вопросы в questions."
+)  # явное требование формата снижает шум LLM [1][3]
 
 def _build_messages(context: dict) -> list[dict]:
     return [
         {"role": "system", "content": SYSTEM_RULES_V2},
-        {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
-    ]
+        {"role": "user",  "content": json.dumps(context, ensure_ascii=False)},
+    ]  # OpenAI‑совместные messages [2]
+
+# ========= PRE-CLEAN: coerce/clean plan =========
+def _coerce_plan(data: dict) -> dict:
+    # Фильтруем и нормализуем слоты до Pydantic, чтобы не падать на «почти валидных» значениях [4]
+    cleaned = []
+    for s in (data.get("appointments") or []):
+        try:
+            if "start" in s:
+                s["start"] = _normalize_hhmm(s["start"])
+            if "end" in s:
+                s["end"] = _normalize_hhmm(s["end"])
+            cleaned.append(s)
+        except Exception:
+            # пропускаем битый слот
+            continue
+    data["appointments"] = cleaned
+    # habits/constraints/questions пропускаем как есть
+    return data  # дальнейшая строгая валидация — в Pydantic [4]
 
 # ========= FALLBACK =========
 def _fallback(context: dict) -> PlanResponseV2:
@@ -85,6 +128,7 @@ def _fallback(context: dict) -> PlanResponseV2:
         return out
 
     def mk(p, d, rng, reason) -> Appointment:
+        start_s, end_s = rng
         return Appointment(
             place_type=p["type"],
             label=p.get("label", p["type"].title()),
@@ -92,13 +136,12 @@ def _fallback(context: dict) -> PlanResponseV2:
             lon=float(p["lon"]),
             radius_m=int(p.get("radius_m", 300)),
             date=d.isoformat(),
-            start=rng,
-            end=rng[15],
+            start=_normalize_hhmm(start_s),
+            end=_normalize_hhmm(end_s),
             confidence=float(p.get("confidence", 0.5)),
             reason=reason,
             signals=["fallback"],
         )
-
 
     res = PlanResponseV2(appointments=[], habits=[], constraints_used=[], need_clarification=True, questions=[])
     work = places.get("work")
@@ -125,22 +168,20 @@ def _fallback(context: dict) -> PlanResponseV2:
     res.questions = ["Нет достаточных данных по местам и активности. Уточнить предпочтительное место и дни недели?"]
     return res
 
-# ========= LLM CALL (DeepSeek/OpenAI совместимый) =========
+# ========= LLM CALL (DeepSeek/OpenAI‑совместимый) =========
 async def _chat_complete(messages: list[dict]) -> str:
     headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
     timeout = httpx.Timeout(connect=3.0, read=float(LLM_TIMEOUT), write=5.0, pool=5.0)
-
     payload = {
         "model": LLM_MODEL,
         "messages": messages,
         "temperature": 0.2,
-        "response_format": {"type": "json_object"},  # стабильный режим для DeepSeek
+        "response_format": {"type": "json_object"},  # стабильный JSON mode для DeepSeek [1]
         "max_tokens": 700,
         "stream": False,
     }
-
     async with httpx.AsyncClient(base_url=LLM_API_URL, headers=headers, timeout=timeout) as client:
-        r = await client.post("/chat/completions", json=payload)
+        r = await client.post("/chat/completions", json=payload)  # тот же путь, что у OpenAI [2]
         if r.status_code >= 400:
             try:
                 print("LLM ERROR:", r.status_code, r.text[:2000])
@@ -150,7 +191,7 @@ async def _chat_complete(messages: list[dict]) -> str:
         data = r.json()
         msg = data.get("choices", [{}]).get("message", {}).get("content")
         if not msg:
-            raise ValueError(f"LLM response missing content: {data}")
+            raise ValueError(f"LLM response missing content: {data}")  # защита на странные ответы [2]
         return msg
 
 # ========= PUBLIC ENTRY =========
@@ -158,7 +199,8 @@ async def plan_meeting(context: dict) -> PlanResponseV2:
     messages = _build_messages(context)
     try:
         raw = await _chat_complete(messages)
-        data = json.loads(raw)
-        return PlanResponseV2(**data)
+        data = json.loads(raw)          # строка JSON -> dict [1]
+        data = _coerce_plan(data)       # нормализация времени и фильтрация [4]
+        return PlanResponseV2(**data)   # строгая проверка схемы на нашей стороне [4]
     except (ValidationError, json.JSONDecodeError, AssertionError, KeyError, ValueError, httpx.HTTPStatusError):
-        return _fallback(context)
+        return _fallback(context)       # безопасное поведение при любой ошибке [4]
