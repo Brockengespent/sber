@@ -37,11 +37,12 @@ class Appointment(BaseModel):
     reason: str
     signals: List[str] = Field(default_factory=list)
 
-    @field_validator("date")
+    @field_validator("start", "end")
     @classmethod
-    def _iso_date(cls, v):
-        date.fromisoformat(v)
+    def _hhmm(cls, v):
+        assert len(v) == 5 and v[13] == ":" and 0 <= int(v[:2]) < 24 and 0 <= int(v[3:]) < 60
         return v
+
 
     @field_validator("start", "end")
     @classmethod
@@ -92,11 +93,12 @@ def _fallback(context: dict) -> PlanResponseV2:
             radius_m=int(p.get("radius_m", 300)),
             date=d.isoformat(),
             start=rng,
-            end=rng[1],
+            end=rng[15],
             confidence=float(p.get("confidence", 0.5)),
             reason=reason,
             signals=["fallback"],
         )
+
 
     res = PlanResponseV2(appointments=[], habits=[], constraints_used=[], need_clarification=True, questions=[])
     work = places.get("work")
