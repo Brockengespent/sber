@@ -136,60 +136,49 @@ def _fallback(context: dict) -> PlanResponseV2:
     return res
 
 # ========= LLM CALL (OpenAI‑совместимый Chat Completions) =========
-async def _chat_complete(messages: list[dict]) -> str:
-    # Подготовка клиента
-    headers = {
-        "Authorization": f"Bearer {LLM_API_KEY}",
-        "Content-Type": "application/json",
-    }
+async def _chat_complete(messages: list[dict], use_json_object: bool = False) -> str:
+    headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
     timeout = httpx.Timeout(connect=3.0, read=float(LLM_TIMEOUT), write=5.0, pool=5.0)
 
     payload = {
         "model": LLM_MODEL,
         "messages": messages,
         "temperature": 0.2,
-        "response_format": _response_format_json_schema(),  # строгий JSON по схеме
+        "response_format": {"type": "json_object"} if use_json_object else _response_format_json_schema(),
         "max_tokens": 700,
         "stream": False,
     }
 
     async with httpx.AsyncClient(base_url=LLM_API_URL, headers=headers, timeout=timeout) as client:
-        # OpenAI‑совместимый путь
         r = await client.post("/chat/completions", json=payload)
-
-        # Полезно увидеть причину при 4xx/5xx
         if r.status_code >= 400:
-            try:
-                print("LLM ERROR:", r.status_code, r.text[:2000])
-            except Exception:
-                pass
-
+            # лог поможет при диагностике: видно точную причину из DeepSeek
+            print("LLM ERROR:", r.status_code, r.text[:2000])
         r.raise_for_status()
         data = r.json()
-
-        # Берём JSON‑строку из первого choices[].message.content
         msg = data.get("choices", [{}]).get("message", {}).get("content")
         if not msg:
             raise ValueError(f"LLM response missing content: {data}")
-
         return msg
+
 
 
 # ========= PUBLIC ENTRY =========
 async def plan_meeting(context: dict) -> PlanResponseV2:
     messages = _build_messages(context)
     try:
-        raw = await _chat_complete(messages)
+        raw = await _chat_complete(messages)  # сначала пробуем со схемой
         data = json.loads(raw)
         return PlanResponseV2(**data)
-    except (ValidationError, json.JSONDecodeError, AssertionError, KeyError):
-        # Один строгий ретрай с явным напоминанием о формате
+    except (ValidationError, json.JSONDecodeError, AssertionError, KeyError, ValueError, httpx.HTTPStatusError):
         retry_messages = messages + [
-            {"role": "system", "content": "ВНИМАНИЕ: верни только один JSON по схеме PlanResponseV2 без Markdown и комментариев."}
+            {"role": "system", "content": "ВНИМАНИЕ: верни только один валидный JSON без Markdown и комментариев. Строго соблюдай поля."}
         ]
         try:
-            raw = await _chat_complete(retry_messages)
+            # Ретрай с упрощённым форматом, совместимым с DeepSeek
+            raw = await _chat_complete(retry_messages, use_json_object=True)
             data = json.loads(raw)
             return PlanResponseV2(**data)
         except Exception:
             return _fallback(context)
+
