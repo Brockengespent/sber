@@ -1,14 +1,32 @@
 # services/llm_local.py
+import os
 import json
+from datetime import date, timedelta
+from typing import Literal, List, Dict, Any
+
 import httpx
-from datetime import date
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL_NAME = "qwen2.5:14b"  # твоя локальная модель
+# ========= ENV CONFIG =========
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek").lower()  # "openai" | "deepseek"
+LLM_API_URL = os.getenv("LLM_API_URL", "https://api.deepseek.com")
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")  # например: "gpt-4o-mini" или "deepseek-chat"
+LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "12"))
+LLM_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY") or ""
+
+# ========= MODELS =========
+class Evidence(BaseModel):
+    type: str  # "trx" | "login" | "geo"
+    when: str  # free text window, e.g. "вт 12:40–13:10"
+    details: str
+
+class Habit(BaseModel):
+    pattern: str
+    evidence: List[Evidence] = Field(default_factory=list)
+    confidence: float = Field(ge=0.0, le=1.0)
 
 class Appointment(BaseModel):
-    place_type: str  # "home"|"work"|"frequent"
+    place_type: Literal["home", "work", "merchant", "neutral"]
     label: str
     lat: float
     lon: float
@@ -18,6 +36,7 @@ class Appointment(BaseModel):
     end: str        # HH:MM
     confidence: float = Field(ge=0.0, le=1.0)
     reason: str
+    signals: List[str] = Field(default_factory=list)
 
     @field_validator("date")
     @classmethod
@@ -28,43 +47,44 @@ class Appointment(BaseModel):
     @field_validator("start", "end")
     @classmethod
     def _hhmm(cls, v):
-        assert len(v) == 5 and v[2] == ":" and 0 <= int(v[:2]) < 24 and 0 <= int(v[3:]) < 60
+        assert len(v) == 5 and v[13] == ":" and 0 <= int(v[:2]) < 24 and 0 <= int(v[3:]) < 60
         return v
 
-class PlanResponse(BaseModel):
-    appointments: list[Appointment] = Field(default_factory=list)
-    alternatives: list[Appointment] = Field(default_factory=list)
+class PlanResponseV2(BaseModel):
+    appointments: List[Appointment] = Field(default_factory=list)
+    habits: List[Habit] = Field(default_factory=list)
+    constraints_used: List[Dict[str, Any]] = Field(default_factory=list)
     need_clarification: bool = False
+    questions: List[str] = Field(default_factory=list)
 
-SYSTEM_RULES = (
-    "Ты планировщик встреч. Верни СТРОГО валидный JSON, без текста вне JSON.\n"
-    'Схема: {"appointments":[...], "alternatives":[...], "need_clarification": boolean}.\n'
-    "Используй только переданный контекст. Дата YYYY-MM-DD, время HH:MM. 1–3 слота.\n"
-    "Если данных мало — need_clarification=true и пустые appointments.\n"
+# ========= PROMPT RULES =========
+SYSTEM_RULES_V2 = (
+    "Ты планировщик встреч. Верни СТРОГО валидный JSON по схеме PlanResponseV2, без текста вне JSON.\n"
+    "Используй только переданный контекст: гео‑места (дом/работа), почасовую/по‑дневную активность, шаблоны расходов (мерчанты/MCC) и регулярно повторяющиеся окна времени.\n"
+    "Дата в формате YYYY-MM-DD, время HH:MM, 1–3 слота. Если данных мало/конфликтуют — need_clarification=true и заполни questions.\n"
 )
 
-def _build_prompt(context: dict) -> str:
-    return SYSTEM_RULES + "Контекст в JSON:\n" + json.dumps(context, ensure_ascii=False)
+def _build_messages(context: dict) -> list[dict]:
+    return [
+        {"role": "system", "content": SYSTEM_RULES_V2},
+        {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+    ]
 
-async def _ollama_call(prompt: str) -> str:
-    payload = {
-        "model": MODEL_NAME,
-        "prompt": prompt,
-        "temperature": 0.2,
-        "format": "json",   # просим строго JSON
-        "options": {"num_ctx": 8192},
-        "stream": False
+def _response_format_json_schema() -> dict:
+    # Генерируем JSON Schema из Pydantic для строгого Structured Output
+    schema = PlanResponseV2.model_json_schema()
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "PlanResponseV2",
+            "schema": schema,
+            "strict": True,
+        },
     }
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(OLLAMA_URL, json=payload)
-        r.raise_for_status()
-        data = r.json()
-        return data.get("response", "")
 
-def _fallback(context: dict) -> PlanResponse:
-    # простая эвристика на случай невалидного ответа
-    from datetime import timedelta
-    places = {p["type"]: p for p in context.get("places", [])}
+# ========= FALLBACK =========
+def _fallback(context: dict) -> PlanResponseV2:
+    places = {p.get("type"): p for p in context.get("places", [])}
     today = date.today()
 
     def next_weekdays(n=3):
@@ -75,51 +95,87 @@ def _fallback(context: dict) -> PlanResponse:
                 out.append(d)
         return out
 
-    def mk(p, d, rng, reason):
+    def mk(p, d, rng, reason) -> Appointment:
         return Appointment(
-            place_type=p["type"], label=p.get("label", p["type"].title()),
-            lat=p["lat"], lon=p["lon"], radius_m=int(p.get("radius_m", 300)),
-            date=d.isoformat(), start=rng[0], end=rng[1],
-            confidence=float(p.get("confidence", 0.5)), reason=reason
+            place_type=p["type"],
+            label=p.get("label", p["type"].title()),
+            lat=float(p["lat"]),
+            lon=float(p["lon"]),
+            radius_m=int(p.get("radius_m", 300)),
+            date=d.isoformat(),
+            start=rng,
+            end=rng[14],
+            confidence=float(p.get("confidence", 0.5)),
+            reason=reason,
+            signals=["fallback"]
         )
 
-    res = PlanResponse(appointments=[], alternatives=[], need_clarification=True)
+    res = PlanResponseV2(appointments=[], habits=[], constraints_used=[], need_clarification=True, questions=[])
     work = places.get("work")
     home = places.get("home")
 
     if work and float(work.get("confidence", 0)) >= 0.5:
         for d in next_weekdays(2):
-            res.appointments.append(mk(work, d, ("11:00","13:00"), "Будний дневной слот рядом с работой"))
+            res.appointments.append(mk(work, d, ("11:00", "13:00"), "Будний дневной слот рядом с работой"))
             if len(res.appointments) >= 2:
                 break
         res.need_clarification = False
         return res
 
     if home and float(home.get("confidence", 0)) >= 0.5:
-        # ближайший выходной
         d = today
         for _ in range(10):
             d += timedelta(days=1)
             if d.weekday() >= 5:
-                res.appointments.append(mk(home, d, ("12:00","16:00"), "Выходной дневной слот рядом с домом"))
+                res.appointments.append(mk(home, d, ("12:00", "16:00"), "Выходной дневной слот рядом с домом"))
                 res.need_clarification = False
                 break
         return res
 
-    return res  # нет уверенных мест — просим уточнение
+    res.questions = ["Нет достаточных данных по местам и активности. Уточнить предпочтительное место и дни недели?"]
+    return res
 
-async def plan_meeting(context: dict) -> PlanResponse:
-    prompt = _build_prompt(context)
+# ========= LLM CALL (OpenAI‑совместимый Chat Completions) =========
+async def _chat_complete(messages: list[dict]) -> str:
+    # Подготовка клиента
+    headers = {
+        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    timeout = httpx.Timeout(connect=3.0, read=float(LLM_TIMEOUT), write=5.0, pool=5.0)
+
+    payload = {
+        "model": LLM_MODEL,
+        "messages": messages,
+        "temperature": 0.2,
+        "response_format": _response_format_json_schema(),  # строгий JSON по схеме
+        "max_tokens": 700,
+        "stream": False,
+    }
+
+    async with httpx.AsyncClient(base_url=LLM_API_URL, headers=headers, timeout=timeout) as client:
+        # Для совместимости: у OpenAI и DeepSeek путь одинаковый
+        r = await client.post("/chat/completions", json=payload)
+        r.raise_for_status()
+        data = r.json()
+        # Берём JSON‑строку из message.content
+        return data["choices"]["message"]["content"]
+
+# ========= PUBLIC ENTRY =========
+async def plan_meeting(context: dict) -> PlanResponseV2:
+    messages = _build_messages(context)
     try:
-        raw = await _ollama_call(prompt)
+        raw = await _chat_complete(messages)
         data = json.loads(raw)
-        return PlanResponse(**data)
-    except (ValidationError, json.JSONDecodeError, AssertionError):
-        # один ретрай строже
-        strict = prompt + "\nВНИМАНИЕ: верни только JSON по схеме, без комментариев."
+        return PlanResponseV2(**data)
+    except (ValidationError, json.JSONDecodeError, AssertionError, KeyError):
+        # Один строгий ретрай с явным напоминанием о формате
+        retry_messages = messages + [
+            {"role": "system", "content": "ВНИМАНИЕ: верни только один JSON по схеме PlanResponseV2 без Markdown и комментариев."}
+        ]
         try:
-            raw = await _ollama_call(strict)
+            raw = await _chat_complete(retry_messages)
             data = json.loads(raw)
-            return PlanResponse(**data)
+            return PlanResponseV2(**data)
         except Exception:
             return _fallback(context)
