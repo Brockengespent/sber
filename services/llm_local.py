@@ -15,8 +15,8 @@ LLM_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY") or ""
 
 # ========= MODELS =========
 class Evidence(BaseModel):
-    type: str              # "trx" | "login" | "geo"
-    when: str              # "вт 12:40–13:10"
+    type: str      # "trx" | "login" | "geo"
+    when: str      # "вт 12:40–13:10"
     details: str
 
 class Habit(BaseModel):
@@ -46,7 +46,7 @@ class Appointment(BaseModel):
     @field_validator("start", "end")
     @classmethod
     def _hhmm(cls, v):
-        assert len(v) == 5 and v[12] == ":" and 0 <= int(v[:2]) < 24 and 0 <= int(v[3:]) < 60
+        assert len(v) == 5 and v[2] == ":" and 0 <= int(v[:2]) < 24 and 0 <= int(v[3:]) < 60
         return v
 
 class PlanResponseV2(BaseModel):
@@ -92,7 +92,7 @@ def _fallback(context: dict) -> PlanResponseV2:
             radius_m=int(p.get("radius_m", 300)),
             date=d.isoformat(),
             start=rng,
-            end=rng[13],
+            end=rng[1],
             confidence=float(p.get("confidence", 0.5)),
             reason=reason,
             signals=["fallback"],
@@ -128,12 +128,11 @@ async def _chat_complete(messages: list[dict]) -> str:
     headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
     timeout = httpx.Timeout(connect=3.0, read=float(LLM_TIMEOUT), write=5.0, pool=5.0)
 
-    # Сразу просим JSON-режим, поддерживаемый DeepSeek
     payload = {
         "model": LLM_MODEL,
         "messages": messages,
         "temperature": 0.2,
-        "response_format": {"type": "json_object"},  # без json_schema — совместимо и стабильно
+        "response_format": {"type": "json_object"},  # стабильный режим для DeepSeek
         "max_tokens": 700,
         "stream": False,
     }
@@ -141,7 +140,6 @@ async def _chat_complete(messages: list[dict]) -> str:
     async with httpx.AsyncClient(base_url=LLM_API_URL, headers=headers, timeout=timeout) as client:
         r = await client.post("/chat/completions", json=payload)
         if r.status_code >= 400:
-            # логируем тело для диагностики
             try:
                 print("LLM ERROR:", r.status_code, r.text[:2000])
             except Exception:
@@ -158,8 +156,7 @@ async def plan_meeting(context: dict) -> PlanResponseV2:
     messages = _build_messages(context)
     try:
         raw = await _chat_complete(messages)
-        data = json.loads(raw)  # строка JSON -> dict
-        return PlanResponseV2(**data)  # валидация на своей стороне
+        data = json.loads(raw)
+        return PlanResponseV2(**data)
     except (ValidationError, json.JSONDecodeError, AssertionError, KeyError, ValueError, httpx.HTTPStatusError):
         return _fallback(context)
-
