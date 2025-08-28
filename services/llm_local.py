@@ -47,7 +47,7 @@ class Appointment(BaseModel):
     @field_validator("start", "end")
     @classmethod
     def _hhmm(cls, v):
-        assert len(v) == 5 and v[13] == ":" and 0 <= int(v[:2]) < 24 and 0 <= int(v[3:]) < 60
+        assert len(v) == 5 and v == ":" and 0 <= int(v[:2]) < 24 and 0 <= int(v[3:]) < 60
         return v
 
 class PlanResponseV2(BaseModel):
@@ -154,12 +154,26 @@ async def _chat_complete(messages: list[dict]) -> str:
     }
 
     async with httpx.AsyncClient(base_url=LLM_API_URL, headers=headers, timeout=timeout) as client:
-        # Для совместимости: у OpenAI и DeepSeek путь одинаковый
+        # OpenAI‑совместимый путь
         r = await client.post("/chat/completions", json=payload)
+
+        # Полезно увидеть причину при 4xx/5xx
+        if r.status_code >= 400:
+            try:
+                print("LLM ERROR:", r.status_code, r.text[:2000])
+            except Exception:
+                pass
+
         r.raise_for_status()
         data = r.json()
-        # Берём JSON‑строку из message.content
-        return data["choices"]["message"]["content"]
+
+        # Берём JSON‑строку из первого choices[].message.content
+        msg = data.get("choices", [{}]).get("message", {}).get("content")
+        if not msg:
+            raise ValueError(f"LLM response missing content: {data}")
+
+        return msg
+
 
 # ========= PUBLIC ENTRY =========
 async def plan_meeting(context: dict) -> PlanResponseV2:
