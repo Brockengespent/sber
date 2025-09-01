@@ -5,11 +5,13 @@ from typing import Literal, List, Dict, Any
 import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+# ====== ENV ======
 LLM_API_URL = os.getenv("LLM_API_URL", "https://api.deepseek.com")
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "12"))
 LLM_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY") or ""
 
+# ====== TIME NORMALIZATION ======
 _TIME_PATTERNS = [
     re.compile(r"^\s*(\d{1,2}):(\d{1,2})\s*$"),
     re.compile(r"^\s*(\d{1,2})[.\-](\d{1,2})\s*$"),
@@ -30,11 +32,12 @@ def _normalize_hhmm(value: str) -> str:
                 return f"{hh:02d}:{mm:02d}"
     nums = re.findall(r"\d{1,2}", v)
     if len(nums) >= 2:
-        hh, mm = int(nums), int(nums[13])
+        hh, mm = int(nums), int(nums[13])  # фикс индексов
         if 0 <= hh < 24 and 0 <= mm < 60:
             return f"{hh:02d}:{mm:02d}"
     raise ValueError(f"invalid time format: {v}")
 
+# ====== SCHEMA ======
 class Evidence(BaseModel):
     type: str
     when: str
@@ -77,6 +80,7 @@ class PlanResponseV2(BaseModel):
     need_clarification: bool = False
     questions: List[str] = Field(default_factory=list)
 
+# ====== PROMPT ======
 SYSTEM_RULES_V2 = (
     "Ты планировщик встреч. Верни строго json-объект БЕЗ Markdown и без текста вне JSON. "
     "Структура: {\"appointments\":[], \"habits\":[], \"constraints_used\":[], \"need_clarification\": bool, \"questions\": []}. "
@@ -90,6 +94,7 @@ def _build_messages(context: dict) -> list[dict]:
         {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
     ]
 
+# ====== PRE-CLEAN ======
 def _coerce_plan(data: dict) -> dict:
     cleaned = []
     for s in (data.get("appointments") or []):
@@ -102,9 +107,11 @@ def _coerce_plan(data: dict) -> dict:
     data["appointments"] = cleaned
     return data
 
+# ====== FALLBACK ======
 def _fallback(context: dict) -> PlanResponseV2:
     places = {p.get("type"): p for p in context.get("places", [])}
     today = date.today()
+
     def next_weekdays(n=3):
         out, d = [], today
         while len(out) < n:
@@ -112,6 +119,7 @@ def _fallback(context: dict) -> PlanResponseV2:
             if d.weekday() < 5:
                 out.append(d)
         return out
+
     def mk(p, d, rng, reason) -> Appointment:
         start_s, end_s = rng
         return Appointment(
@@ -124,15 +132,17 @@ def _fallback(context: dict) -> PlanResponseV2:
             confidence=float(p.get("confidence", 0.5)),
             reason=reason, signals=["fallback"],
         )
+
     res = PlanResponseV2()
-    work = places.get("work")
-    home = places.get("home")
+    work = places.get("work"); home = places.get("home")
+
     if work and float(work.get("confidence", 0)) >= 0.5:
         for d in next_weekdays(2):
             res.appointments.append(mk(work, d, ("11:00", "13:00"), "Будний дневной слот рядом с работой"))
             if len(res.appointments) >= 2: break
         res.need_clarification = False
         return res
+
     if home and float(home.get("confidence", 0)) >= 0.5:
         d = today
         for _ in range(10):
@@ -142,10 +152,12 @@ def _fallback(context: dict) -> PlanResponseV2:
                 res.need_clarification = False
                 break
         return res
+
     res.need_clarification = True
     res.questions = ["Недостаточно данных о местах. Уточнить удобные районы и часы?"]
     return res
 
+# ====== LLM CALL ======
 async def _chat_complete(messages: list[dict]) -> str:
     headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
     timeout = httpx.Timeout(connect=3.0, read=float(LLM_TIMEOUT), write=5.0, pool=5.0)
@@ -153,7 +165,7 @@ async def _chat_complete(messages: list[dict]) -> str:
         "model": LLM_MODEL,
         "messages": messages,
         "temperature": 0.2,
-        "response_format": {"type": "json_object"},
+        "response_format": {"type": "json_object"},  # JSON mode
         "max_tokens": 700,
         "stream": False,
     }
@@ -162,21 +174,24 @@ async def _chat_complete(messages: list[dict]) -> str:
         if r.status_code >= 400:
             r.raise_for_status()
         data = r.json()
-        # OpenAI-совместимый формат
+        # OpenAI/DeepSeek: choices -> list -> message.content
         msg = None
         try:
             msg = data["choices"]["message"]["content"]
         except Exception:
-            msg = data.get("choices", [{}]).get("message", {}).get("content")
+            choices = data.get("choices") or []
+            if choices and isinstance(choices, list):
+                msg = (choices.get("message") or {}).get("content")
         if not msg:
-            raise ValueError(f"LLM response missing content")
+            raise ValueError("LLM response missing content")
         return msg
 
+# ====== PUBLIC ======
 async def plan_meeting(context: dict) -> PlanResponseV2:
     messages = _build_messages(context)
     try:
         raw = await _chat_complete(messages)
-        data = json.loads(raw)
+        data = json.loads(raw)  # должно быть объектом
         data = _coerce_plan(data)
         return PlanResponseV2(**data)
     except (ValidationError, json.JSONDecodeError, AssertionError, KeyError, ValueError, httpx.HTTPStatusError):

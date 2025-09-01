@@ -120,20 +120,16 @@
       },
       body: JSON.stringify(data)
     });
-
-    let text = '';
-    try { text = await res.text(); } catch { text = ''; }
-
+    let text = await res.text().catch(()=> '');
     let json = null;
     try { json = text ? JSON.parse(text) : null; } catch { json = null; }
-
-    // Страховка: массив -> объект
     if (Array.isArray(json)) {
-      json = { appointments: [], habits: [], constraints_used: [], need_clarification: true, questions: ["Ответ пришёл в виде массива"] };
+      json = { appointments: [], habits: [], constraints_used: [], need_clarification: true,
+              questions: ["Ответ пришёл в виде массива"] };
     }
-
     if (!res.ok) {
-      const msg = (json && (json.detail || json.message)) ? (json.detail || json.message) : (text || ('HTTP ' + res.status));
+      const msg = (json && (json.detail || json.message)) ? (json.detail || json.message)
+                : (text || ('HTTP ' + res.status));
       throw new Error(msg);
     }
     return json || {};
@@ -185,6 +181,7 @@
     });
   });
   </script>
+
 
 
   <!-- Доп. утилиты (не внутри предыдущего скрипта) -->
