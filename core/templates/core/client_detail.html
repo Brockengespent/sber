@@ -101,9 +101,7 @@
   <div class="card mt-3">
     <div class="card-header d-flex justify-content-between align-items-center">
       <div class="fw-semibold">Рекомендация контакта (ЛЛМ)</div>
-      <div class="btn-group">
-        <button id="llmSuggestBtn" class="btn btn-sm btn-outline-primary">Предложить встречу</button>
-      </div>
+      <button id="llmSuggestBtn" class="btn btn-sm btn-outline-primary">Предложить встречу</button>
     </div>
     <div class="card-body">
       <div id="llmError" class="text-danger small d-none"></div>
@@ -123,7 +121,6 @@
       body: JSON.stringify(data)
     });
 
-    // Считать тело ОДИН раз
     let text = '';
     try { text = await res.text(); } catch { text = ''; }
 
@@ -143,11 +140,9 @@
   }
 
   function renderPlan(plan) {
-    // Страховка формата
     if (!plan || typeof plan !== 'object' || Array.isArray(plan)) {
       plan = { appointments: [], habits: [], constraints_used: [], need_clarification: true, questions: ["Нет данных"] };
     }
-
     const el = document.getElementById('llmResult');
     const err = document.getElementById('llmError');
     err.classList.add('d-none');
@@ -157,7 +152,7 @@
       const rows = plan.appointments.map(a => `
         <li>
           <b>${a.label}</b> (${a.place_type}) — ${a.date} ${a.start}–${a.end},
-          радиус ~${a.radius_m}м, уверенность ${Math.round((a.confidence || 0) * 100)}%.<br/>
+          радиус ~${a.radius_m}м, уверенность ${Math.round((a.confidence||0)*100)}%.<br/>
           Причина: ${a.reason || '—'}
         </li>
       `).join('');
@@ -172,10 +167,9 @@
     }
   }
 
-
   document.addEventListener('DOMContentLoaded', () => {
     const btn = document.getElementById('llmSuggestBtn');
-    btn.addEventListener('click', async () => {
+    btn?.addEventListener('click', async () => {
       const err = document.getElementById('llmError');
       const out = document.getElementById('llmResult');
       err.textContent = ''; err.classList.add('d-none'); out.innerHTML = 'Запрос…';
@@ -191,6 +185,7 @@
     });
   });
   </script>
+
 
   <!-- Доп. утилиты (не внутри предыдущего скрипта) -->
   <script>
