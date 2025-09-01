@@ -8,6 +8,9 @@
   <style>
     .hw-home { font-size: 20px; }
     .hw-work { font-size: 20px; }
+
+    /* Скрыть маленький флаг в атрибуции Leaflet (если он появляется из стилей/плагинов) */
+    .leaflet-attribution-flag { display: none !important; }
   </style>
 {% endblock %}
 
@@ -118,14 +121,34 @@
     let map, heatLayer, homeMarker, workMarker;
     const MAX_ZOOM = 19;
 
+    // Базовые подложки (несколько хостов для обхода блокировок)
+    const baseLayers = {
+      'OSM': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: MAX_ZOOM,
+        attribution: '© OpenStreetMap'
+      }),
+      'OSM HOT': L.tileLayer('https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png', {
+        maxZoom: MAX_ZOOM,
+        attribution: '© OpenStreetMap contributors, style HOT'
+      }),
+      'Carto Light': L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+        maxZoom: MAX_ZOOM,
+        attribution: '© OpenStreetMap, © CARTO'
+      })
+    };
+
     function initMap() {
-      map = L.map('map', { minZoom: 3, maxZoom: MAX_ZOOM })
+      // Отключаем дефолтный атрибуционный контрол и добавляем свой без префикса
+      map = L.map('map', { minZoom: 3, maxZoom: MAX_ZOOM, attributionControl: false })
               .setView([55.751244, 37.618423], 10);
 
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: MAX_ZOOM,
-        attribution: '&copy; OpenStreetMap contributors'
-      }).addTo(map);
+      L.control.attribution({ prefix: '' }).addTo(map);
+
+      // Стартовая подложка — нейтральная OSM
+      baseLayers['OSM'].addTo(map);
+
+      // Переключатель подложек
+      L.control.layers(baseLayers, {}).addTo(map);
 
       map.on('zoomend', () => {
         if (!heatLayer) return;
@@ -263,7 +286,7 @@
         renderHeat(pts);
 
         if (pts.length > 0) {
-          const latlngs = pts.map(p => L.latLng(p[0], p[1]));
+          const latlngs = pts.map(p => L.latLng(p, p[11]));
           const bounds = L.latLngBounds(latlngs);
           if (bounds.isValid()) {
             if (bounds.getNorthWest().equals(bounds.getSouthEast())) {
