@@ -4,59 +4,101 @@ from asgiref.sync import async_to_sync
 from django.views.decorators.http import require_POST
 from django.views.decorators.csrf import csrf_exempt
 from django.http import JsonResponse, HttpResponseBadRequest
-from django.db.models import Sum, Count, Value
-from django.db.models.functions import Coalesce
+from django.db.models import Sum, Count
 
 from .geo_features import compute_home_work_and_activity
 from .models import ClientCity, Tr
 from services.llm_local import plan_meeting
 
+
 def build_context_for_client(client_id: str, period: str = "30d") -> dict:
+    """
+    Готовит контекст для планировщика:
+    - места home/work на основе логинов,
+    - активность по часам/дням,
+    - топ-мерчанты по расходам (D).
+    """
     feats = compute_home_work_and_activity(
         client_id=str(client_id),
         period=period,
         events=['Login Success', 'Authorization Success']  # только входы
     )
     places = feats.get("places", [])
-    activity = feats.get("activity", {"hourly":[]*24, "weekday":[]*7})
+    # Ваша строка имела баг: [] * 24 даст пустой список, нужно создать массивы длины 24/7
+    activity = feats.get("activity", {"hourly":  * 24, "weekday":  * 7})
+
 
     # Топ мерчантов по расходам (D)
-    qs = Tr.objects.filter(ac_client_hash=str(client_id), t_trx_direction='D', c_txn_rub_amt__gt=0)
-    top = (qs.values('t_merchant_name','t_trx_city')
-             .annotate(amount=Sum('c_txn_rub_amt'), ops=Count('*'))
-             .order_by('-amount')[:5])
+    qs = Tr.objects.filter(
+        ac_client_hash=str(client_id),
+        t_trx_direction='D',
+        c_txn_rub_amt__gt=0,
+    )
+    top = (
+        qs.values('t_merchant_name', 't_trx_city')
+          .annotate(amount=Sum('c_txn_rub_amt'), ops=Count('*'))
+          .order_by('-amount')[:5]
+    )
     merchants = [{
-        "name": (row['t_merchant_name'] or "—"),
-        "city": (row['t_trx_city'] or "—"),
-        "amount": float(row['amount'] or 0),
-        "ops": int(row['ops'] or 0),
+        "name": (row.get('t_merchant_name') or "—"),
+        "city": (row.get('t_trx_city') or "—"),
+        "amount": float(row.get('amount') or 0),
+        "ops": int(row.get('ops') or 0),
     } for row in top]
 
-    city = ClientCity.objects.filter(ac_client_hash=str(client_id)).values_list('city', flat=True).first()
+    city = ClientCity.objects.filter(
+        ac_client_hash=str(client_id)
+    ).values_list('city', flat=True).first()
 
     return {
         "client_id": str(client_id),
         "city": city or "",
-        "places": places,            # содержит home/work гипотезы
-        "activity": activity,        # почасовая/по дням
-        "merchants_top": merchants,  # подсказки «Пятерочка/Магнит/Dodo»
+        "places": places,             # содержит home/work гипотезы
+        "activity": activity,         # почасовая/по дням
+        "merchants_top": merchants,   # подсказки «Пятёрочка/Магнит/Dodo»
         "constraints": {
-            "meeting_hours_weekday": ["10:00-13:00","16:00-19:00"],
+            "meeting_hours_weekday": ["10:00-13:00", "16:00-19:00"],
             "meeting_hours_weekend": ["12:00-17:00"],
         },
     }
 
+
 @csrf_exempt
 @require_POST
 def plan_meeting_view(request):
+    """
+    POST JSON: {"client_id": "...", "period": "7d|30d|90d|all"}
+    Возвращает строго объект (dict) с полями PlanResponseV2.
+    """
     try:
-        body = json.loads(request.body.decode("utf-8"))
+        # Читаем тело один раз и парсим
+        raw = request.body.decode("utf-8") if request.body else "{}"
+        body = json.loads(raw) if raw else {}
         client_id = body.get("client_id")
         period = body.get("period", "30d")
         if not client_id:
             return HttpResponseBadRequest("client_id required")
+
         ctx = build_context_for_client(client_id, period)
+
+        # Вызываем LLM-планировщик (он возвращает Pydantic-модель)
         result = async_to_sync(plan_meeting)(ctx)
-        return JsonResponse(result.model_dump(), safe=False)
+        data = result.model_dump()
+
+        # Страховка: верхний уровень всегда объект, даже если где-то вернулся list
+        if not isinstance(data, dict):
+            data = {
+                "appointments": [],
+                "habits": [],
+                "constraints_used": [],
+                "need_clarification": True,
+                "questions": ["Некорректный формат ответа модели: ожидался объект."]
+            }
+
+        # Возвращаем JSON-объект; safe=False допускает и не-dict, но у нас dict
+        return JsonResponse(data, safe=False)
+    except json.JSONDecodeError:
+        return HttpResponseBadRequest("Invalid JSON body")
     except Exception as e:
+        # В отладке можно логировать e с трейсом
         return HttpResponseBadRequest(str(e))

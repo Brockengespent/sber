@@ -130,6 +130,11 @@
     let json = null;
     try { json = text ? JSON.parse(text) : null; } catch { json = null; }
 
+    // Страховка: массив -> объект
+    if (Array.isArray(json)) {
+      json = { appointments: [], habits: [], constraints_used: [], need_clarification: true, questions: ["Ответ пришёл в виде массива"] };
+    }
+
     if (!res.ok) {
       const msg = (json && (json.detail || json.message)) ? (json.detail || json.message) : (text || ('HTTP ' + res.status));
       throw new Error(msg);
@@ -137,8 +142,12 @@
     return json || {};
   }
 
-
   function renderPlan(plan) {
+    // Страховка формата
+    if (!plan || typeof plan !== 'object' || Array.isArray(plan)) {
+      plan = { appointments: [], habits: [], constraints_used: [], need_clarification: true, questions: ["Нет данных"] };
+    }
+
     const el = document.getElementById('llmResult');
     const err = document.getElementById('llmError');
     err.classList.add('d-none');
@@ -148,7 +157,7 @@
       const rows = plan.appointments.map(a => `
         <li>
           <b>${a.label}</b> (${a.place_type}) — ${a.date} ${a.start}–${a.end},
-          радиус ~${a.radius_m}м, уверенность ${Math.round((a.confidence||0)*100)}%.<br/>
+          радиус ~${a.radius_m}м, уверенность ${Math.round((a.confidence || 0) * 100)}%.<br/>
           Причина: ${a.reason || '—'}
         </li>
       `).join('');
@@ -162,6 +171,7 @@
       el.innerHTML += `<div class="mt-2">Нужно уточнение:</div><ul>${qs}</ul>`;
     }
   }
+
 
   document.addEventListener('DOMContentLoaded', () => {
     const btn = document.getElementById('llmSuggestBtn');
