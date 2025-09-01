@@ -155,36 +155,37 @@ async def _chat_complete(messages: list[dict]) -> str:
         "model": LLM_MODEL,
         "messages": messages,
         "temperature": 0.2,
-        "response_format": {"type": "json_object"},
+        "response_format": {"type": "json_object"},  # JSON mode
         "max_tokens": 700,
         "stream": False,
     }
+
     async with httpx.AsyncClient(base_url=LLM_API_URL, headers=headers, timeout=timeout) as client:
         r = await client.post("/chat/completions", json=payload)
         if r.status_code >= 400:
             r.raise_for_status()
+
         data = r.json()
         logger.info("LLM: http=%s model=%s choices_len=%s", r.status_code, data.get("model"), len(data.get("choices") or []))
 
-        # Универсальный извлекатель контента
+        # Универсальный извлекатель content из разных форматов choices
         def _extract_content(d) -> str | None:
-            # d — dict варианта choice
+            # d как dict: стандарт OpenAI {"message": {"content": "..."}}
             if isinstance(d, dict):
-                # Стандарт: {"message": {"content": "..."}}
                 msg = d.get("message")
                 if isinstance(msg, dict) and "content" in msg:
                     return msg.get("content")
-                # Иногда контент лежит прямо в choice["content"]
+                # Иногда кладут строку прямо в choice["content"]
                 if isinstance(d.get("content"), str):
                     return d.get("content")
                 # Нестандарт: message — список из одного dict
                 if isinstance(msg, list) and msg:
-                    inner = msg[0]
+                    inner = msg
                     if isinstance(inner, dict) and "content" in inner:
                         return inner["content"]
-            # d — список: берём первый элемент и пробуем ещё раз
+            # d как list: берём первый элемент и пробуем рекурсивно
             if isinstance(d, list) and d:
-                first = d[0]
+                first = d
                 if isinstance(first, dict):
                     return _extract_content(first)
             return None
@@ -192,16 +193,17 @@ async def _chat_complete(messages: list[dict]) -> str:
         msg = None
         choices = data.get("choices") or []
         if isinstance(choices, list) and choices:
-            msg = _extract_content(choices[0])  # <-- берём первый элемент, а не весь список
+            msg = _extract_content(choices)
 
-        # Редкий случай: контент на верхнем уровне
+        # Резерв: контент на верхнем уровне (некоторые прокси/SDK)
         if not msg and isinstance(data, dict) and isinstance(data.get("content"), str):
             msg = data.get("content")
 
-        logger.info("LLM: content head=%s", (msg or "")[:120].replace("\n"," "))
+        logger.info("LLM: content head=%s", (msg or "")[:120].replace("\n", " "))
         if not msg:
             raise ValueError("LLM response missing content")
         return msg
+
 
 
 
