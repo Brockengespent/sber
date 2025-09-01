@@ -98,54 +98,115 @@
 <div class="row g-4">
 
   <!-- LLM — рекомендация -->
-  <div class="card shadow-sm mb-4" id="llm">
+  <div class="card mt-3">
     <div class="card-header d-flex justify-content-between align-items-center">
-      <div class="fw-semibold">Рекомендация контакта (LLM)</div>
-      <div class="d-flex align-items-center gap-2">
-        <select id="llm-period" class="form-select form-select-sm" style="width:auto;">
-          <option value="7d" {% if period == '7d' %}selected{% endif %}>7д</option>
-          <option value="30d" {% if period == '30d' %}selected{% endif %}>30д</option>
-          <option value="90d" {% if period == '90d' %}selected{% endif %}>90д</option>
-          <option value="all" {% if period == 'all' %}selected{% endif %}>Всё</option>
-        </select>
-        <button class="btn btn-sm btn-outline-secondary" id="llm-refresh">Предложить встречу</button>
-        <button class="btn btn-sm btn-outline-secondary" disabled>Создать задачу</button>
+      <div class="fw-semibold">Рекомендация контакта (ЛЛМ)</div>
+      <div class="btn-group">
+        <button id="llmSuggestBtn" class="btn btn-sm btn-outline-primary">Предложить встречу</button>
       </div>
     </div>
     <div class="card-body">
-      <div id="llm-error" class="text-danger mb-2" style="display:none;"></div>
-      <div id="llm-loading" class="muted" style="display:none;">Загрузка…</div>
-
-      <div id="llm-results" style="display:none;">
-        <div class="row g-3">
-          <div class="col-md-6">
-            <div class="kpi">
-              <div class="muted small">Оптимальное время</div>
-              <div class="h5 mb-0" id="llm-best-time">—</div>
-            </div>
-          </div>
-          <div class="col-md-6">
-            <div class="kpi">
-              <div class="muted small">Рекомендуемое место</div>
-              <div class="h5 mb-0" id="llm-best-place">—</div>
-            </div>
-          </div>
-          <div class="col-12">
-            <div class="muted small mb-1">Слоты</div>
-            <div id="llm-appointments"></div>
-          </div>
-          <div class="col-12">
-            <div class="muted small mb-1">Привычки</div>
-            <div id="llm-habits"></div>
-          </div>
-          <div class="col-12">
-            <div class="muted small">Комментарий / уточнения</div>
-            <p class="mb-0" id="llm-comment">—</p>
-          </div>
-        </div>
-      </div>
+      <div id="llmError" class="text-danger small d-none"></div>
+      <div id="llmResult" class="small"></div>
     </div>
   </div>
+
+  <script>
+  async function postJSON(url, data) {
+    const res = await fetch(url, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest'
+      },
+      body: JSON.stringify(data)
+    });
+    let payload = null;
+    try { payload = await res.json(); } catch { payload = null; }
+    if (!res.ok) {
+      const msg = payload && (payload.detail || payload.message) ? (payload.detail || payload.message) : (await res.text()).slice(0,300);
+      throw new Error(msg || ('HTTP ' + res.status));
+    }
+    return payload;
+  }
+
+  function renderPlan(plan) {
+    const el = document.getElementById('llmResult');
+    const err = document.getElementById('llmError');
+    err.classList.add('d-none');
+    el.innerHTML = '';
+
+    if (plan.appointments && plan.appointments.length) {
+      const rows = plan.appointments.map(a => `
+        <li>
+          <b>${a.label}</b> (${a.place_type}) — ${a.date} ${a.start}–${a.end},
+          радиус ~${a.radius_m}м, уверенность ${Math.round((a.confidence||0)*100)}%.<br/>
+          Причина: ${a.reason || '—'}
+        </li>
+      `).join('');
+      el.innerHTML += `<div class="mb-2">Слоты встречи:</div><ul>${rows}</ul>`;
+    } else {
+      el.innerHTML += `<div class="text-muted">Слотов не предложено.</div>`;
+    }
+
+    if (plan.need_clarification && plan.questions && plan.questions.length) {
+      const qs = plan.questions.map(q => `<li>${q}</li>`).join('');
+      el.innerHTML += `<div class="mt-2">Нужно уточнение:</div><ul>${qs}</ul>`;
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    const btn = document.getElementById('llmSuggestBtn');
+    btn.addEventListener('click', async () => {
+      const err = document.getElementById('llmError');
+      const out = document.getElementById('llmResult');
+      err.textContent = ''; err.classList.add('d-none'); out.innerHTML = 'Запрос…';
+      try {
+        const payload = { client_id: '{{ obj.ac_client_hash }}', period: '{{ period|default:"30d" }}' };
+        const plan = await postJSON('{% url "plan_meeting" %}', payload);
+        renderPlan(plan);
+      } catch (e) {
+        out.innerHTML = '';
+        err.textContent = 'Ошибка: ' + (e?.message || e);
+        err.classList.remove('d-none');
+      }
+    });
+  });
+  </script>
+
+  <!-- Доп. утилиты (не внутри предыдущего скрипта) -->
+  <script>
+  (function () {
+    function fmtDateISO(d) {
+      if (!d) return null;
+      try {
+        const [Y, M, D] = d.split('-').map(Number);
+        if (!Y || !M || !D) return null;
+        return `${String(D).padStart(2,'0')}.${String(M).padStart(2,'0')}.${Y}`;
+      } catch { return null; }
+    }
+
+    function fmtSlot(s) {
+      if (!s) return '';
+      const start = (s.start && /^\d{2}:\d{2}$/.test(s.start)) ? s.start : '';
+      const end   = (s.end   && /^\d{2}:\d{2}$/.test(s.end))   ? s.end   : '';
+      const label = s.label || (s.place_type === 'home' ? 'Дом' : (s.place_type === 'work' ? 'Работа' : 'Место'));
+      const dStr = s.date || '';
+      const when = [dStr, (start && end) ? `${start}–${end}` : (start || end)].filter(Boolean).join(' ');
+      const coords = (s.lat != null && s.lon != null) ? `(${Number(s.lat).toFixed(4)}, ${Number(s.lon).toFixed(4)})` : '';
+      const radius = s.radius_m ? `, радиус ${s.radius_m}м` : '';
+      const conf = (s.confidence != null) ? `, доверие ${(Number(s.confidence)*100).toFixed(0)}%` : '';
+      const reason = s.reason ? ` — ${s.reason}` : '';
+      return `<div class="llm-slot"><div><span class="llm-badge">${label}</span><b>${when || 'Дата/время уточняются'}</b></div><div class="muted">${coords}${radius}${conf}${reason}</div></div>`;
+    }
+
+    // Эти утилиты используются ниже в другом месте страницы при необходимости
+    window.__fmtDateISO = fmtDateISO;
+    window.__fmtSlot = fmtSlot;
+  })();
+  </script>
+
 
   <!-- Поступления -->
   <div class="col-lg-8">
