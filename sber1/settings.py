@@ -128,15 +128,22 @@ if USE_HTTPS and not DEBUG:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 # -------- Logging to stdout/stderr (для PaaS) --------
+# settings.py (добавить/заменить блок LOGGING)
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
-    "handlers": {"console": {"class": "logging.StreamHandler"}},
-    "root": {"handlers": ["console"], "level": os.environ.get("LOG_LEVEL", "INFO")},
+    "handlers": {
+        "console": {"class": "logging.StreamHandler"},
+    },
     "loggers": {
-        "django.db.backends": {
+        # наш канал для LLM
+        "llm": {
             "handlers": ["console"],
-            "level": os.environ.get("DB_LOG_LEVEL", "WARNING"),
+            "level": "INFO",   # при необходимости DEBUG
+            "propagate": False,
         },
+        # оставить базовые джанговые если нужно
+        "django.server": {"handlers": ["console"], "level": "INFO", "propagate": False},
     },
 }
+
