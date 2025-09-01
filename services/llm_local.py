@@ -165,17 +165,23 @@ async def _chat_complete(messages: list[dict]) -> str:
             r.raise_for_status()
         data = r.json()
         logger.info("LLM: http=%s model=%s choices_len=%s", r.status_code, data.get("model"), len(data.get("choices") or []))
+
         msg = None
-        try:
-            msg = data["choices"]["message"]["content"]
-        except Exception:
-            choices = data.get("choices") or []
-            if choices and isinstance(choices, list):
-                msg = (choices.get("message") or {}).get("content")
+        # ПРАВИЛЬНЫЙ доступ к массиву choices:
+        choices = data.get("choices") or []
+        if isinstance(choices, list) and choices:
+            first = choices or {}
+            message = first.get("message") or {}
+            msg = message.get("content")
+        else:
+            # некоторые провайдеры кладут строку прямо в поле 'content'
+            msg = data.get("content")
+
         logger.info("LLM: content head=%s", (msg or "")[:120].replace("\n"," "))
         if not msg:
             raise ValueError("LLM response missing content")
         return msg
+
 
 async def plan_meeting(context: dict) -> PlanResponseV2:
     logger.info("LLM: call start places=%s merchants=%s", len(context.get("places", [])), len(context.get("merchants_top", [])))
