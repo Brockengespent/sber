@@ -25,7 +25,8 @@ def build_context_for_client(client_id: str, period: str = "30d") -> dict:
     )
     places = feats.get("places", [])
     # Ваша строка имела баг: [] * 24 даст пустой список, нужно создать массивы длины 24/7
-    activity = feats.get("activity", {"hourly":  * 24, "weekday":  * 7})
+    activity = feats.get("activity", {"hourly": [0] * 24, "weekday": [0] * 7})
+
 
 
     # Топ мерчантов по расходам (D)
