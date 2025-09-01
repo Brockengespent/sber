@@ -170,39 +170,66 @@ async def _chat_complete(messages: list[dict]) -> str:
 
         # Универсальный извлекатель content из разных форматов choices
         def _extract_content(d) -> str | None:
-            # d как dict: стандарт OpenAI {"message": {"content": "..."}}
+            # d — dict: пробуем несколько известных схем
             if isinstance(d, dict):
+                # 1) OpenAI-совместимый: {"message":{"content": "..."}}
                 msg = d.get("message")
-                if isinstance(msg, dict) and "content" in msg:
-                    return msg.get("content")
-                # Иногда кладут строку прямо в choice["content"]
+                if isinstance(msg, dict):
+                    if isinstance(msg.get("content"), str):
+                        return msg["content"]
+                    # иногда message: {"content":[{"type":"text","text":"..."}]}
+                    cont = msg.get("content")
+                    if isinstance(cont, list) and cont and isinstance(cont, dict):
+                        if isinstance(cont.get("text"), str):
+                            return cont["text"]
+                # 2) Streaming-подобный формат: {"delta":{"content":"..."}}
+                delta = d.get("delta")
+                if isinstance(delta, dict) and isinstance(delta.get("content"), str):
+                    return delta["content"]
+                # 3) Альтернативы: {"content":"..."} или {"text":"..."}
                 if isinstance(d.get("content"), str):
-                    return d.get("content")
-                # Нестандарт: message — список из одного dict
-                if isinstance(msg, list) and msg:
-                    inner = msg
-                    if isinstance(inner, dict) and "content" in inner:
-                        return inner["content"]
-            # d как list: берём первый элемент и пробуем рекурсивно
+                    return d["content"]
+                if isinstance(d.get("text"), str):
+                    return d["text"]
+                # 4) messages как список: {"messages":[{"content":"..."}]}
+                msgs = d.get("messages")
+                if isinstance(msgs, list) and msgs:
+                    first = msgs
+                    if isinstance(first, dict):
+                        if isinstance(first.get("content"), str):
+                            return first["content"]
+                        parts = first.get("content")  # может быть список блоков
+                        if isinstance(parts, list) and parts and isinstance(parts, dict):
+                            if isinstance(parts.get("text"), str):
+                                return parts["text"]
+            # d — список: берём первый элемент и пробуем рекурсивно
             if isinstance(d, list) and d:
                 first = d
-                if isinstance(first, dict):
+                if isinstance(first, dict) or isinstance(first, list):
                     return _extract_content(first)
             return None
 
-        msg = None
         choices = data.get("choices") or []
+        msg = None
         if isinstance(choices, list) and choices:
             msg = _extract_content(choices)
 
-        # Резерв: контент на верхнем уровне (некоторые прокси/SDK)
-        if not msg and isinstance(data, dict) and isinstance(data.get("content"), str):
-            msg = data.get("content")
+        # Резерв: верхний уровень
+        if not msg and isinstance(data, dict):
+            for k in ("content", "text"):
+                if isinstance(data.get(k), str):
+                    msg = data[k]; break
 
-        logger.info("LLM: content head=%s", (msg or "")[:120].replace("\n", " "))
+        logger.info("LLM: content head=%s", (msg or "")[:120].replace("\n"," "))
         if not msg:
+            # На время диагностики можно логнуть первых 500 символов сырого JSON:
+            try:
+                logger.info("LLM RAW: %s", json.dumps(data, ensure_ascii=False)[:500])
+            except Exception:
+                pass
             raise ValueError("LLM response missing content")
         return msg
+
 
 
 
