@@ -166,21 +166,44 @@ async def _chat_complete(messages: list[dict]) -> str:
         data = r.json()
         logger.info("LLM: http=%s model=%s choices_len=%s", r.status_code, data.get("model"), len(data.get("choices") or []))
 
+        # Универсальный извлекатель контента
+        def _extract_content(d) -> str | None:
+            # d — dict варианта choice
+            if isinstance(d, dict):
+                # Стандарт: {"message": {"content": "..."}}
+                msg = d.get("message")
+                if isinstance(msg, dict) and "content" in msg:
+                    return msg.get("content")
+                # Иногда контент лежит прямо в choice["content"]
+                if isinstance(d.get("content"), str):
+                    return d.get("content")
+                # Нестандарт: message — список из одного dict
+                if isinstance(msg, list) and msg:
+                    inner = msg[0]
+                    if isinstance(inner, dict) and "content" in inner:
+                        return inner["content"]
+            # d — список: берём первый элемент и пробуем ещё раз
+            if isinstance(d, list) and d:
+                first = d[0]
+                if isinstance(first, dict):
+                    return _extract_content(first)
+            return None
+
         msg = None
-        # ПРАВИЛЬНЫЙ доступ к массиву choices:
         choices = data.get("choices") or []
         if isinstance(choices, list) and choices:
-            first = choices or {}
-            message = first.get("message") or {}
-            msg = message.get("content")
-        else:
-            # некоторые провайдеры кладут строку прямо в поле 'content'
+            msg = _extract_content(choices[0])  # <-- берём первый элемент, а не весь список
+
+        # Редкий случай: контент на верхнем уровне
+        if not msg and isinstance(data, dict) and isinstance(data.get("content"), str):
             msg = data.get("content")
 
         logger.info("LLM: content head=%s", (msg or "")[:120].replace("\n"," "))
         if not msg:
             raise ValueError("LLM response missing content")
         return msg
+
+
 
 
 async def plan_meeting(context: dict) -> PlanResponseV2:
