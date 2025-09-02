@@ -87,10 +87,12 @@ class PlanResponseV2(BaseModel):
 SYSTEM_RULES_V2 = (
     "Ты планировщик встреч. Верни строго json-объект БЕЗ Markdown и без текста вне JSON. "
     "Структура: {\"appointments\":[], \"habits\":[], \"constraints_used\":[], \"need_clarification\": bool, \"questions\": []}. "
-    "Дата строго YYYY-MM-DD, время строго HH:MM. Разрешённые place_type: home|work|merchant|neutral. Дай 1–3 слота. "
-    "Если данных мало — need_clarification=true и вопросы в questions. "
-    "Всегда используй русский язык во всех строковых полях (label, reason, questions)."
+    "Дата строго YYYY-MM-DD, время строго HH:MM. Разрешённые place_type: home|work|merchant|neutral. "
+    "Если нет достоверных home/work, используй place_type=\"neutral\" рядом с типичным районом активности. "
+    "Обязательно верни 1–2 слота в appointments, если есть хоть какая-то активность или мерчанты; пустой appointments запрещён. "
+    "Всё на русском: label, reason, questions. Минимизируй вопросы — предпочитай выдавать слоты."
 )
+
 
 
 def _build_messages(context: dict) -> list[dict]:
@@ -126,21 +128,43 @@ def _fallback(context: dict) -> PlanResponseV2:
     places = {p.get("type"): p for p in context.get("places", [])}
     today = date.today()
 
-    def next_weekdays(n=3):
+    # Извлечь candidate точку: home/work, иначе торговые точки (мерчанты) или центр масс по activity
+    def pick_point():
+        # приоритет: work, home
+        for t in ("work", "home"):
+            p = next((x for x in context.get("places", []) if x.get("type") == t and x.get("lat") and x.get("lon")), None)
+            if p and float(p.get("confidence", 0)) >= 0.4:
+                return {"type": "neutral", "label": "Нейтральная локация", "lat": float(p["lat"]), "lon": float(p["lon"]), "radius_m": int(p.get("radius_m", 300)), "confidence": 0.5}
+        # попробуем усреднить мерчантов (если есть координаты)
+        merchants = context.get("merchants_top") or []
+        coords = [(m.get("lat"), m.get("lon")) for m in merchants if m.get("lat") and m.get("lon")]
+        coords = [(float(a), float(b)) for a, b in coords if a is not None and b is not None]
+        if coords:
+            la = sum(a for a, _ in coords) / len(coords)
+            lo = sum(b for _, b in coords) / len(coords)
+            return {"type": "neutral", "label": "Нейтральная локация", "lat": la, "lon": lo, "radius_m": 400, "confidence": 0.4}
+        return None
+
+    # выбрать окна времени из constraints
+    cons = (context.get("constraints") or {})
+    wday_ranges = cons.get("meeting_hours_weekday") or ["10:00-13:00", "16:00-19:00"]
+    wend_ranges = cons.get("meeting_hours_weekend") or ["12:00-17:00"]
+
+    # функция выбора следующих рабочих/выходных
+    def next_days(k=3):
         out, d = [], today
-        while len(out) < n:
+        while len(out) < k:
             d += timedelta(days=1)
-            if d.weekday() < 5:
-                out.append(d)
+            out.append(d)
         return out
 
     def mk(p, d, rng, reason) -> Appointment:
         start_s, end_s = rng
         return Appointment(
-            place_type=p["type"],
-            label=p.get("label", p["type"].title()),
+            place_type="neutral",
+            label=p.get("label", "Нейтральная локация"),
             lat=float(p["lat"]), lon=float(p["lon"]),
-            radius_m=int(p.get("radius_m", 300)),
+            radius_m=int(p.get("radius_m", 400)),
             date=d.isoformat(),
             start=_normalize_hhmm(start_s), end=_normalize_hhmm(end_s),
             confidence=float(p.get("confidence", 0.5)),
@@ -148,28 +172,74 @@ def _fallback(context: dict) -> PlanResponseV2:
         )
 
     res = PlanResponseV2()
-    work = places.get("work"); home = places.get("home")
+    anchor = pick_point()
 
+    # Если есть уверенный work/home — предыдущая логика (оставим как есть)
+    work = places.get("work"); home = places.get("home")
     if work and float(work.get("confidence", 0)) >= 0.5:
-        for d in next_weekdays(2):
-            res.appointments.append(mk(work, d, ("11:00", "13:00"), "Будний дневной слот рядом с работой"))
+        for d in next_days(3):
+            if d.weekday() < 5:
+                res.appointments.append(
+                    Appointment(
+                        place_type="work",
+                        label=work.get("label", "Работа"),
+                        lat=float(work["lat"]), lon=float(work["lon"]),
+                        radius_m=int(work.get("radius_m", 300)),
+                        date=d.isoformat(),
+                        start="11:00", end="13:00",
+                        confidence=float(work.get("confidence", 0.6)),
+                        reason="Будний дневной слот рядом с работой",
+                        signals=["fallback"],
+                    )
+                )
             if len(res.appointments) >= 2: break
         res.need_clarification = False
         return res
 
     if home and float(home.get("confidence", 0)) >= 0.5:
-        d = today
-        for _ in range(10):
-            d += timedelta(days=1)
+        for d in next_days(7):
             if d.weekday() >= 5:
-                res.appointments.append(mk(home, d, ("12:00", "16:00"), "Выходной дневной слот рядом с домом"))
-                res.need_clarification = False
+                res.appointments.append(
+                    Appointment(
+                        place_type="home",
+                        label=home.get("label", "Дом"),
+                        lat=float(home["lat"]), lon=float(home["lon"]),
+                        radius_m=int(home.get("radius_m", 300)),
+                        date=d.isoformat(),
+                        start="12:00", end="16:00",
+                        confidence=float(home.get("confidence", 0.6)),
+                        reason="Выходной дневной слот рядом с домом",
+                        signals=["fallback"],
+                    )
+                )
                 break
+        res.need_clarification = False if res.appointments else True
+        if res.appointments:
+            return res
+
+    # Нейтральная точка: всегда вернуть хотя бы 1–2 слота
+    if anchor:
+        for d in next_days(5):
+            if d.weekday() < 5 and wday_ranges:
+                s, e = (wday_ranges.split("-", 1) if "-" in wday_ranges else ("10:00", "13:00"))
+                res.appointments.append(mk(anchor, d, (s, e), "Будний слот в нейтральной зоне активности"))
+                break
+        # Добавим второй (выходной), если возможно
+        for d in next_days(7):
+            if d.weekday() >= 5 and wend_ranges:
+                s, e = (wend_ranges.split("-", 1) if "-" in wend_ranges else ("12:00", "16:00"))
+                res.appointments.append(mk(anchor, d, (s, e), "Выходной слот в нейтральной зоне активности"))
+                break
+        res.need_clarification = False if res.appointments else True
+        if not res.appointments:
+            res.questions = ["Уточнить удобный район для нейтральной встречи?"]
         return res
 
+    # Совсем нет якоря — минимальный вопрос
     res.need_clarification = True
-    res.questions = ["Недостаточно данных о местах. Уточнить удобные районы и часы?"]
+    res.questions = ["Нет точки для встречи. Уточнить район активности (дом/работа/частые места)?"]
     return res
+
 
 # ====== LLM CALL ======
 async def _chat_complete(messages: list[dict]) -> str:
