@@ -4,6 +4,7 @@ import logging
 from datetime import date, timedelta
 from typing import Literal, List, Dict, Any
 import anyio
+from anyio import fail_after  # правильный async context manager
 import httpx
 from httpx import AsyncHTTPTransport, ReadTimeout, TimeoutException
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -38,7 +39,7 @@ def _normalize_hhmm(value: str) -> str:
                 return f"{hh:02d}:{mm:02d}"
     nums = re.findall(r"\d{1,2}", v)
     if len(nums) >= 2:
-        hh, mm = int(nums), int(nums[6])
+        hh, mm = int(nums), int(nums[14])
         if 0 <= hh < 24 and 0 <= mm < 60:
             return f"{hh:02d}:{mm:02d}"
     raise ValueError(f"invalid time format: {v}")
@@ -94,13 +95,13 @@ SYSTEM_RULES_V2 = (
     "Если нет достоверных home/work, используй place_type=\"neutral\" рядом с типичным районом активности. "
     "Обязательно верни 1–2 слота в appointments, если есть хоть какая-то активность или мерчанты; пустой appointments запрещён. "
     "Всегда используй русский язык во всех строковых полях (label, reason, questions)."
-)  # JSON mode в API принудительно заставляет возвращать объект. [5]
+)  # JSON mode обеспечивается на стороне API. [13]
 
 def _build_messages(context: dict) -> list[dict]:
     return [
         {"role": "system", "content": SYSTEM_RULES_V2},
         {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
-    ]  # Сообщения формируются минимально, чтобы не мешать JSON mode. [4]
+    ]  # Минимально, чтобы не мешать JSON mode. [12]
 
 # ====== PRE-CLEAN ======
 def _coerce_plan(data: dict) -> dict:
@@ -112,7 +113,6 @@ def _coerce_plan(data: dict) -> dict:
             cleaned.append(s)
         except Exception:
             continue
-    # нормализуем constraints_used: строки -> объекты с id
     cu = data.get("constraints_used") or []
     norm = []
     for c in cu:
@@ -120,7 +120,6 @@ def _coerce_plan(data: dict) -> dict:
             norm.append(c)
         elif isinstance(c, str):
             norm.append({"id": c})
-    # лёгкая русификация частых англ. вопросов (защита от редких «срывов» языка)
     qs = data.get("questions") or []
     ru_qs = []
     for q in qs:
@@ -134,7 +133,7 @@ def _coerce_plan(data: dict) -> dict:
     data["appointments"] = cleaned
     data["constraints_used"] = norm
     data["questions"] = ru_qs
-    return data  # Подготовленный к валидации объект. [3]
+    return data  # Готово к валидации. [11]
 
 # ====== FALLBACK ======
 def _fallback(context: dict) -> PlanResponseV2:
@@ -148,7 +147,6 @@ def _fallback(context: dict) -> PlanResponseV2:
             out.append(d)
         return out
 
-    # выбрать нейтральную точку, если нет уверенных home/work
     def pick_point():
         for t in ("work", "home"):
             p = next((x for x in context.get("places", []) if x.get("type") == t and x.get("lat") and x.get("lon")), None)
@@ -226,13 +224,11 @@ def _fallback(context: dict) -> PlanResponseV2:
 
     anchor = pick_point()
     if anchor:
-        # будний
         for d in next_days(5):
             if d.weekday() < 5 and wday_ranges:
                 s, e = (wday_ranges.split("-", 1) if "-" in wday_ranges else ("10:00", "13:00"))
                 res.appointments.append(mk(anchor, d, (s, e), "Будний слот в нейтральной зоне активности"))
                 break
-        # выходной
         for d in next_days(7):
             if d.weekday() >= 5 and wend_ranges:
                 s, e = (wend_ranges.split("-", 1) if "-" in wend_ranges else ("12:00", "16:00"))
@@ -245,26 +241,26 @@ def _fallback(context: dict) -> PlanResponseV2:
 
     res.need_clarification = True
     res.questions = ["Нет точки для встречи. Уточнить район активности (дом/работа/частые места)?"]
-    return res  # Гарантированные слоты/вопросы без LLM. [3]
+    return res  # Гарантированные слоты/вопросы без LLM. [11]
 
 # ====== LLM CALL ======
 async def _chat_complete(messages: list[dict]) -> str:
     headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
     timeout = httpx.Timeout(connect=3.0, read=float(LLM_TIMEOUT), write=5.0, pool=5.0)
-    transport = AsyncHTTPTransport(retries=2)
+    transport = AsyncHTTPTransport(retries=2)  # повторы соединений [10]
 
     payload = {
         "model": LLM_MODEL,
         "messages": messages,
         "temperature": 0.2,
-        "response_format": {"type": "json_object"},
+        "response_format": {"type": "json_object"},  # JSON mode [13]
         "max_tokens": 700,
         "stream": False,
-    }  # JSON mode фиксирует объектный ответ. [5]
+    }
 
     async with httpx.AsyncClient(base_url=LLM_API_URL, headers=headers, timeout=timeout, transport=transport) as client:
         last_err = None
-        async with anyio.fail_after(LLM_HARD_DEADLINE):  # общий жёсткий дедлайн
+        async with fail_after(LLM_HARD_DEADLINE):  # общий жёсткий дедлайн [1]
             for attempt in range(3):
                 try:
                     r = await client.post("/chat/completions", json=payload)
@@ -331,34 +327,9 @@ async def _chat_complete(messages: list[dict]) -> str:
                 except (ReadTimeout, TimeoutException) as e:
                     last_err = e
                     logger.warning("LLM: read timeout attempt %s: %s", attempt + 1, e)
-                    await anyio.sleep(0.7 * (2 ** attempt))  # backoff
+                    await anyio.sleep(0.7 * (2 ** attempt))  # экспоненциальный backoff [6]
                 except httpx.HTTPError as e:
                     last_err = e
                     logger.warning("LLM: HTTP error attempt %s: %s", attempt + 1, e)
                     await anyio.sleep(0.7 * (2 ** attempt))
-            raise last_err or ReadTimeout("LLM read timeout")  # уйдёт в fallback. [1]
-
-# ====== PUBLIC ======
-async def plan_meeting(context: dict) -> PlanResponseV2:
-    logger.info("LLM: call start places=%s merchants=%s", len(context.get("places", [])), len(context.get("merchants_top", [])))
-    messages = _build_messages(context)
-    try:
-        raw = await _chat_complete(messages)
-        logger.info("LLM: raw len=%s head=%s", len(raw or ""), (raw or "")[:200].replace("\n"," "))
-        data = json.loads(raw)
-        logger.info("LLM: parsed type=%s keys=%s", type(data).__name__, (list(data.keys())[:5] if isinstance(data, dict) else None))
-        data = _coerce_plan(data)
-        logger.info("LLM: after coerce appointments=%s", len(data.get("appointments", [])) if isinstance(data, dict) else None)
-        out = PlanResponseV2(**data)
-        # Если модель ничего не дала — дожимаем fallback-слотами
-        if not out.appointments:
-            fb = _fallback(context)
-            if fb.appointments:
-                out.appointments = fb.appointments
-                out.need_clarification = fb.need_clarification
-                out.questions = fb.questions
-                out.constraints_used = out.constraints_used or [{"source": "fallback"}]
-        return out
-    except (ValidationError, json.JSONDecodeError, AssertionError, KeyError, ValueError, httpx.HTTPStatusError, ReadTimeout, TimeoutException) as e:
-        logger.exception("LLM: fallback due to error: %s", e)
-        return _fallback(context)
+            raise last_err or ReadTimeout("LLM read timeout")  # уйдёт в fallback
