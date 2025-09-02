@@ -9,7 +9,7 @@ from django.db.models import Sum, Count
 
 from .geo_features import compute_home_work_and_activity
 from .models import ClientCity, Tr
-import services.llm_local as llm_local
+import services.llm_local as llm_local  # импортируем модуль целиком [11]
 
 logger = logging.getLogger("llm")
 
@@ -37,7 +37,7 @@ def build_context_for_client(client_id: str, period: str = "30d") -> dict:
         "city": (row.get('t_trx_city') or "—"),
         "amount": float(row.get('amount') or 0),
         "ops": int(row.get('ops') or 0),
-        # опционально: если в БД есть координаты — добавить здесь lat/lon
+        # если есть координаты в БД — можно добавить lat/lon
     } for row in top]
 
     city = ClientCity.objects.filter(
@@ -59,15 +59,17 @@ def build_context_for_client(client_id: str, period: str = "30d") -> dict:
             "meeting_hours_weekday": ["10:00-13:00", "16:00-19:00"],
             "meeting_hours_weekend": ["12:00-17:00"],
         },
-    }  # Контекст для LLM/фоллбэка. [3]
+    }
 
 @csrf_exempt
 @require_POST
 def plan_meeting_view(request):
     try:
         logger.info("LLM: request received %s", request.path)
+
         raw = request.body.decode("utf-8") if request.body else "{}"
         logger.info("LLM: raw body len=%s", len(raw))
+
         body = json.loads(raw) if raw else {}
         logger.info("LLM: body type=%s keys=%s", type(body).__name__, (list(body.keys())[:5] if isinstance(body, dict) else None))
 
@@ -78,23 +80,30 @@ def plan_meeting_view(request):
         client_id = body.get("client_id")
         period = body.get("period", "30d")
         logger.info("LLM: params client_id=%s period=%s", str(client_id)[:8], period)
+
         if not client_id:
             logger.warning("LLM: missing client_id -> 400")
             return HttpResponseBadRequest("client_id required")
 
         ctx = build_context_for_client(client_id, period)
-        logger.info("LLM: ctx summary places=%s merchants=%s", len(ctx.get("places", [])), len(ctx.get("merchants_top", [])))
+        logger.info(
+            "LLM: ctx summary places=%s merchants=%s",
+            len(ctx.get("places", [])), len(ctx.get("merchants_top", [])),
+        )
 
-        # Основной вызов — внутри async, но с безопасной обработкой ошибок в самом сервисе
-        result = async_to_sync(plan_meeting)(ctx)
+        # ВАЖНО: вызываем через модульный алиас, не через незаданное имя
+        result = async_to_sync(llm_local.plan_meeting)(ctx)  # [2]
         data = result.model_dump()
         logger.info("LLM: model_dump type=%s keys=%s", type(data).__name__, (list(data.keys())[:5] if isinstance(data, dict) else None))
 
         if not isinstance(data, dict):
-            logger.warning("LLM: model_dump returned %s -> wrapping dict", type(data).__name__)
-            data = _fallback(ctx).model_dump()
+            logger.warning("LLM: model_dump returned %s -> wrapping to dict", type(data).__name__)
+            data = llm_local._fallback(ctx).model_dump()
 
-        preview = json.dumps({k: (data[k] if k != "appointments" else f"{len(data[k])} slots") for k in list(data.keys())[:4]}, ensure_ascii=False)
+        try:
+            preview = json.dumps({k: (data[k] if k != "appointments" else f"{len(data[k])} slots") for k in list(data.keys())[:4]}, ensure_ascii=False)
+        except Exception:
+            preview = str(type(data))
         logger.info("LLM: response preview=%s", preview)
 
         return JsonResponse(data, safe=False)
@@ -103,13 +112,14 @@ def plan_meeting_view(request):
         logger.exception("LLM: JSON decode error: %s", e)
         return HttpResponseBadRequest("Invalid JSON body")
     except Exception as e:
-        # На крайний случай — вернём fallback, чтобы не отдавать 500/HTML
         logger.exception("LLM: unhandled error, returning fallback: %s", e)
         try:
-            # безопасно соберём client_id из тела, если доступен
             client_id = (body.get("client_id") if isinstance(body, dict) else None) or ""
-            ctx = build_context_for_client(client_id, "30d") if client_id else {"places": [], "activity": {"hourly":[0] *24, "weekday":[0] *7}, "merchants_top": [], "constraints": {"meeting_hours_weekday": ["10:00-13:00", "16:00-19:00"], "meeting_hours_weekend": ["12:00-17:00"]}}
-            fb = _fallback(ctx).model_dump()
+            ctx = build_context_for_client(client_id, "30d") if client_id else {
+                "places": [], "activity": {"hourly": *24, "weekday": *7}, "merchants_top": [],
+                "constraints": {"meeting_hours_weekday": ["10:00-13:00", "16:00-19:00"], "meeting_hours_weekend": ["12:00-17:00"]}
+            }
+            fb = llm_local._fallback(ctx).model_dump()
             return JsonResponse(fb, safe=False)
         except Exception:
             return HttpResponseBadRequest(str(e))
