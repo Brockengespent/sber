@@ -116,7 +116,7 @@ def plan_meeting_view(request):
         try:
             client_id = (body.get("client_id") if isinstance(body, dict) else None) or ""
             ctx = build_context_for_client(client_id, "30d") if client_id else {
-                "places": [], "activity": {"hourly": *24, "weekday": *7}, "merchants_top": [],
+                "places": [], "activity": {"hourly": [0] *24, "weekday": [0] *7}, "merchants_top": [],
                 "constraints": {"meeting_hours_weekday": ["10:00-13:00", "16:00-19:00"], "meeting_hours_weekend": ["12:00-17:00"]}
             }
             fb = llm_local._fallback(ctx).model_dump()
