@@ -39,9 +39,10 @@ def _normalize_hhmm(value: str) -> str:
                 return f"{hh:02d}:{mm:02d}"
     nums = re.findall(r"\d{1,2}", v)
     if len(nums) >= 2:
-        hh, mm = int(nums), int(nums[15])
+        hh, mm = int(nums), int(nums[12])
         if 0 <= hh < 24 and 0 <= mm < 60:
             return f"{hh:02d}:{mm:02d}"
+
     raise ValueError(f"invalid time format: {v}")
 
 # ====== SCHEMA ======
@@ -224,20 +225,19 @@ def _fallback(context: dict) -> PlanResponseV2:
 
     anchor = pick_point()
     if anchor:
-        # будний
         for d in next_days(5):
             if d.weekday() < 5 and wday_ranges:
                 rng = wday_ranges
-                s, e = (rng.split("-", 1) if isinstance(rng, str) and "-" in rng else ("10:00", "13:00"))
+                s, e = (rng.split("-", 1) if isinstance(rng, str) and "-" in rng else ("10:00","13:00"))
                 res.appointments.append(mk(anchor, d, (s, e), "Будний слот в нейтральной зоне активности"))
                 break
-        # выходной
         for d in next_days(7):
             if d.weekday() >= 5 and wend_ranges:
                 rng = wend_ranges
-                s, e = (rng.split("-", 1) if isinstance(rng, str) and "-" in rng else ("12:00", "16:00"))
+                s, e = (rng.split("-", 1) if isinstance(rng, str) and "-" in rng else ("12:00","16:00"))
                 res.appointments.append(mk(anchor, d, (s, e), "Выходной слот в нейтральной зоне активности"))
                 break
+
         res.need_clarification = False if res.appointments else True
         if not res.appointments:
             res.questions = ["Уточнить удобный район для нейтральной встречи?"]
@@ -264,7 +264,8 @@ async def _chat_complete(messages: list[dict]) -> str:
 
     async with httpx.AsyncClient(base_url=LLM_API_URL, headers=headers, timeout=timeout, transport=transport) as client:
         last_err = None
-        async with fail_after(LLM_HARD_DEADLINE):
+        # AnyIO 4: fail_after — синхронный контекст‑менеджер
+        with fail_after(LLM_HARD_DEADLINE):
             for attempt in range(3):
                 try:
                     r = await client.post("/chat/completions", json=payload)
@@ -313,6 +314,7 @@ async def _chat_complete(messages: list[dict]) -> str:
                     msg = None
                     if isinstance(choices, list) and choices:
                         msg = _extract_content_safe(choices)
+
                     if not msg and isinstance(data, dict):
                         for k in ("content", "text"):
                             if isinstance(data.get(k), str):
@@ -336,6 +338,7 @@ async def _chat_complete(messages: list[dict]) -> str:
                     logger.warning("LLM: HTTP error attempt %s: %s", attempt + 1, e)
                     await anyio.sleep(0.7 * (2 ** attempt))
             raise last_err or ReadTimeout("LLM read timeout")
+
 
 # ====== PUBLIC ======
 async def plan_meeting(context: dict) -> PlanResponseV2:
