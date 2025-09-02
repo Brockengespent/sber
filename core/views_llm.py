@@ -9,7 +9,7 @@ from django.db.models import Sum, Count
 
 from .geo_features import compute_home_work_and_activity
 from .models import ClientCity, Tr
-import services.llm_local as llm_local  # импортируем модуль целиком [11]
+import services.llm_local as llm_local  # импортируем модуль, не отдельные имена [11]
 
 logger = logging.getLogger("llm")
 
@@ -86,24 +86,18 @@ def plan_meeting_view(request):
             return HttpResponseBadRequest("client_id required")
 
         ctx = build_context_for_client(client_id, period)
-        logger.info(
-            "LLM: ctx summary places=%s merchants=%s",
-            len(ctx.get("places", [])), len(ctx.get("merchants_top", [])),
-        )
+        logger.info("LLM: ctx summary places=%s merchants=%s", len(ctx.get("places", [])), len(ctx.get("merchants_top", [])))
 
-        # ВАЖНО: вызываем через модульный алиас, не через незаданное имя
-        result = async_to_sync(llm_local.plan_meeting)(ctx)  # [2]
+        # ВАЖНО: вызываем через модуль llm_local, не через голое имя [11]
+        result = async_to_sync(llm_local.plan_meeting)(ctx)  # корректный вызов корутины из sync view [12]
         data = result.model_dump()
         logger.info("LLM: model_dump type=%s keys=%s", type(data).__name__, (list(data.keys())[:5] if isinstance(data, dict) else None))
 
         if not isinstance(data, dict):
-            logger.warning("LLM: model_dump returned %s -> wrapping to dict", type(data).__name__)
+            logger.warning("LLM: model_dump returned %s -> wrapping dict", type(data).__name__)
             data = llm_local._fallback(ctx).model_dump()
 
-        try:
-            preview = json.dumps({k: (data[k] if k != "appointments" else f"{len(data[k])} slots") for k in list(data.keys())[:4]}, ensure_ascii=False)
-        except Exception:
-            preview = str(type(data))
+        preview = json.dumps({k: (data[k] if k != "appointments" else f"{len(data[k])} slots") for k in list(data.keys())[:4]}, ensure_ascii=False)
         logger.info("LLM: response preview=%s", preview)
 
         return JsonResponse(data, safe=False)
@@ -116,7 +110,7 @@ def plan_meeting_view(request):
         try:
             client_id = (body.get("client_id") if isinstance(body, dict) else None) or ""
             ctx = build_context_for_client(client_id, "30d") if client_id else {
-                "places": [], "activity": {"hourly": [0] *24, "weekday": [0] *7}, "merchants_top": [],
+                "places": [], "activity": {"hourly": [0] *24, "weekday":[0] *7}, "merchants_top": [],
                 "constraints": {"meeting_hours_weekday": ["10:00-13:00", "16:00-19:00"], "meeting_hours_weekend": ["12:00-17:00"]}
             }
             fb = llm_local._fallback(ctx).model_dump()
