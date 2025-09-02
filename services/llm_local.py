@@ -88,8 +88,10 @@ SYSTEM_RULES_V2 = (
     "Ты планировщик встреч. Верни строго json-объект БЕЗ Markdown и без текста вне JSON. "
     "Структура: {\"appointments\":[], \"habits\":[], \"constraints_used\":[], \"need_clarification\": bool, \"questions\": []}. "
     "Дата строго YYYY-MM-DD, время строго HH:MM. Разрешённые place_type: home|work|merchant|neutral. Дай 1–3 слота. "
-    "Если данных мало — need_clarification=true и вопросы в questions."
+    "Если данных мало — need_clarification=true и вопросы в questions. "
+    "Всегда используй русский язык во всех строковых полях (label, reason, questions)."
 )
+
 
 def _build_messages(context: dict) -> list[dict]:
     return [
