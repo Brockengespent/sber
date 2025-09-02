@@ -9,7 +9,7 @@ from django.db.models import Sum, Count
 
 from .geo_features import compute_home_work_and_activity
 from .models import ClientCity, Tr
-from services.llm_local import plan_meeting, _fallback  # fallback на крайний случай
+import services.llm_local as llm_local
 
 logger = logging.getLogger("llm")
 
