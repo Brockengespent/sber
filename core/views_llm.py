@@ -9,7 +9,7 @@ from django.db.models import Sum, Count
 
 from .geo_features import compute_home_work_and_activity
 from .models import ClientCity, Tr
-import services.llm_local as llm_local  # импортируем модуль, не отдельные имена [11]
+import services.llm_local as llm_local
 
 logger = logging.getLogger("llm")
 
@@ -37,7 +37,6 @@ def build_context_for_client(client_id: str, period: str = "30d") -> dict:
         "city": (row.get('t_trx_city') or "—"),
         "amount": float(row.get('amount') or 0),
         "ops": int(row.get('ops') or 0),
-        # если есть координаты в БД — можно добавить lat/lon
     } for row in top]
 
     city = ClientCity.objects.filter(
@@ -88,8 +87,7 @@ def plan_meeting_view(request):
         ctx = build_context_for_client(client_id, period)
         logger.info("LLM: ctx summary places=%s merchants=%s", len(ctx.get("places", [])), len(ctx.get("merchants_top", [])))
 
-        # ВАЖНО: вызываем через модуль llm_local, не через голое имя [11]
-        result = async_to_sync(llm_local.plan_meeting)(ctx)  # корректный вызов корутины из sync view [12]
+        result = async_to_sync(llm_local.plan_meeting)(ctx)
         data = result.model_dump()
         logger.info("LLM: model_dump type=%s keys=%s", type(data).__name__, (list(data.keys())[:5] if isinstance(data, dict) else None))
 
@@ -110,7 +108,7 @@ def plan_meeting_view(request):
         try:
             client_id = (body.get("client_id") if isinstance(body, dict) else None) or ""
             ctx = build_context_for_client(client_id, "30d") if client_id else {
-                "places": [], "activity": {"hourly": [0] *24, "weekday":[0] *7}, "merchants_top": [],
+                "places": [], "activity": {"hourly": [0] *24, "weekday": [0] *7}, "merchants_top": [],
                 "constraints": {"meeting_hours_weekday": ["10:00-13:00", "16:00-19:00"], "meeting_hours_weekend": ["12:00-17:00"]}
             }
             fb = llm_local._fallback(ctx).model_dump()
