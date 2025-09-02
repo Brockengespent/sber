@@ -3,7 +3,9 @@ import os, re, json
 import logging
 from datetime import date, timedelta
 from typing import Literal, List, Dict, Any
+import anyio
 import httpx
+from httpx import AsyncHTTPTransport, ReadTimeout, TimeoutException
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 logger = logging.getLogger("llm")
@@ -11,7 +13,7 @@ logger = logging.getLogger("llm")
 # ====== ENV ======
 LLM_API_URL = os.getenv("LLM_API_URL", "https://api.deepseek.com")
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
-LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "12"))
+LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "12"))  # seconds for read timeout
 LLM_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY") or ""
 
 # ====== TIME NORMALIZATION ======
@@ -90,10 +92,8 @@ SYSTEM_RULES_V2 = (
     "Дата строго YYYY-MM-DD, время строго HH:MM. Разрешённые place_type: home|work|merchant|neutral. "
     "Если нет достоверных home/work, используй place_type=\"neutral\" рядом с типичным районом активности. "
     "Обязательно верни 1–2 слота в appointments, если есть хоть какая-то активность или мерчанты; пустой appointments запрещён. "
-    "Всё на русском: label, reason, questions. Минимизируй вопросы — предпочитай выдавать слоты."
+    "Всегда используй русский язык во всех строковых полях (label, reason, questions)."
 )
-
-
 
 def _build_messages(context: dict) -> list[dict]:
     return [
@@ -111,7 +111,7 @@ def _coerce_plan(data: dict) -> dict:
             cleaned.append(s)
         except Exception:
             continue
-    # Нормализуем constraints_used к списку словарей
+    # нормализуем constraints_used (строки -> объекты)
     cu = data.get("constraints_used") or []
     norm = []
     for c in cu:
@@ -121,6 +121,18 @@ def _coerce_plan(data: dict) -> dict:
             norm.append({"id": c})
     data["appointments"] = cleaned
     data["constraints_used"] = norm
+    # лёгкая русификация частых англ. вопросов (необязательно)
+    qs = data.get("questions") or []
+    ru_qs = []
+    for q in qs:
+        if not isinstance(q, str):
+            continue
+        ru_q = (q
+                .replace("What is the purpose of the meeting?", "Какова цель встречи?")
+                .replace("Who are you meeting with?", "С кем планируется встреча?")
+                .replace("What is your preferred date for the meeting?", "Какая предпочтительная дата встречи?"))
+        ru_qs.append(ru_q)
+    data["questions"] = ru_qs
     return data
 
 # ====== FALLBACK ======
@@ -128,14 +140,19 @@ def _fallback(context: dict) -> PlanResponseV2:
     places = {p.get("type"): p for p in context.get("places", [])}
     today = date.today()
 
-    # Извлечь candidate точку: home/work, иначе торговые точки (мерчанты) или центр масс по activity
+    def next_days(k=3):
+        out, d = [], today
+        while len(out) < k:
+            d += timedelta(days=1)
+            out.append(d)
+        return out
+
+    # выбрать нейтральную точку при отсутствии уверенных home/work
     def pick_point():
-        # приоритет: work, home
         for t in ("work", "home"):
             p = next((x for x in context.get("places", []) if x.get("type") == t and x.get("lat") and x.get("lon")), None)
             if p and float(p.get("confidence", 0)) >= 0.4:
                 return {"type": "neutral", "label": "Нейтральная локация", "lat": float(p["lat"]), "lon": float(p["lon"]), "radius_m": int(p.get("radius_m", 300)), "confidence": 0.5}
-        # попробуем усреднить мерчантов (если есть координаты)
         merchants = context.get("merchants_top") or []
         coords = [(m.get("lat"), m.get("lon")) for m in merchants if m.get("lat") and m.get("lon")]
         coords = [(float(a), float(b)) for a, b in coords if a is not None and b is not None]
@@ -145,18 +162,9 @@ def _fallback(context: dict) -> PlanResponseV2:
             return {"type": "neutral", "label": "Нейтральная локация", "lat": la, "lon": lo, "radius_m": 400, "confidence": 0.4}
         return None
 
-    # выбрать окна времени из constraints
     cons = (context.get("constraints") or {})
     wday_ranges = cons.get("meeting_hours_weekday") or ["10:00-13:00", "16:00-19:00"]
     wend_ranges = cons.get("meeting_hours_weekend") or ["12:00-17:00"]
-
-    # функция выбора следующих рабочих/выходных
-    def next_days(k=3):
-        out, d = [], today
-        while len(out) < k:
-            d += timedelta(days=1)
-            out.append(d)
-        return out
 
     def mk(p, d, rng, reason) -> Appointment:
         start_s, end_s = rng
@@ -172,10 +180,8 @@ def _fallback(context: dict) -> PlanResponseV2:
         )
 
     res = PlanResponseV2()
-    anchor = pick_point()
-
-    # Если есть уверенный work/home — предыдущая логика (оставим как есть)
     work = places.get("work"); home = places.get("home")
+
     if work and float(work.get("confidence", 0)) >= 0.5:
         for d in next_days(3):
             if d.weekday() < 5:
@@ -217,14 +223,15 @@ def _fallback(context: dict) -> PlanResponseV2:
         if res.appointments:
             return res
 
-    # Нейтральная точка: всегда вернуть хотя бы 1–2 слота
+    anchor = pick_point()
     if anchor:
+        # хотя бы один будний
         for d in next_days(5):
             if d.weekday() < 5 and wday_ranges:
                 s, e = (wday_ranges.split("-", 1) if "-" in wday_ranges else ("10:00", "13:00"))
                 res.appointments.append(mk(anchor, d, (s, e), "Будний слот в нейтральной зоне активности"))
                 break
-        # Добавим второй (выходной), если возможно
+        # и, по возможности, один выходной
         for d in next_days(7):
             if d.weekday() >= 5 and wend_ranges:
                 s, e = (wend_ranges.split("-", 1) if "-" in wend_ranges else ("12:00", "16:00"))
@@ -235,16 +242,16 @@ def _fallback(context: dict) -> PlanResponseV2:
             res.questions = ["Уточнить удобный район для нейтральной встречи?"]
         return res
 
-    # Совсем нет якоря — минимальный вопрос
     res.need_clarification = True
     res.questions = ["Нет точки для встречи. Уточнить район активности (дом/работа/частые места)?"]
     return res
-
 
 # ====== LLM CALL ======
 async def _chat_complete(messages: list[dict]) -> str:
     headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
     timeout = httpx.Timeout(connect=3.0, read=float(LLM_TIMEOUT), write=5.0, pool=5.0)
+    transport = AsyncHTTPTransport(retries=2)
+
     payload = {
         "model": LLM_MODEL,
         "messages": messages,
@@ -254,71 +261,81 @@ async def _chat_complete(messages: list[dict]) -> str:
         "stream": False,
     }
 
-    async with httpx.AsyncClient(base_url=LLM_API_URL, headers=headers, timeout=timeout) as client:
-        r = await client.post("/chat/completions", json=payload)
-        if r.status_code >= 400:
-            r.raise_for_status()
-
-        data = r.json()
-        logger.info("LLM: http=%s model=%s choices_len=%s", r.status_code, data.get("model"), len(data.get("choices") or []))
-
-        # Безопасный извлекатель контента из разных форматов
-        def _extract_content_safe(obj, max_depth: int = 6) -> str | None:
-            seen = set()
-            def _key(o):
-                try: return id(o)
-                except Exception: return None
-            def _walk(o, depth: int) -> str | None:
-                if depth < 0: return None
-                kid = _key(o)
-                if kid is not None:
-                    if kid in seen: return None
-                    seen.add(kid)
-
-                if isinstance(o, dict):
-                    msg = o.get("message")
-                    if isinstance(msg, dict) and isinstance(msg.get("content"), str):
-                        return msg["content"]
-                    if isinstance(msg, list) and msg:
-                        first = msg
-                        if isinstance(first, dict):
-                            if isinstance(first.get("content"), str): return first["content"]
-                            if isinstance(first.get("text"), str): return first["text"]
-                    if isinstance(o.get("content"), str): return o["content"]
-                    if isinstance(o.get("text"), str): return o["text"]
-                    msgs = o.get("messages")
-                    if isinstance(msgs, list) and msgs:
-                        got = _walk(msgs, depth - 1)
-                        if got: return got
-                    delta = o.get("delta")
-                    if isinstance(delta, dict) and isinstance(delta.get("content"), str):
-                        return delta["content"]
-
-                if isinstance(o, list) and o:
-                    for i in range(min(len(o), 3)):
-                        got = _walk(o[i], depth - 1)
-                        if got: return got
-                return None
-            return _walk(obj, max_depth)
-
-        choices = data.get("choices") or []
-        msg = None
-        if isinstance(choices, list) and choices:
-            msg = _extract_content_safe(choices)
-
-        if not msg and isinstance(data, dict):
-            for k in ("content", "text"):
-                if isinstance(data.get(k), str):
-                    msg = data[k]; break
-
-        logger.info("LLM: content head=%s", (msg or "")[:120].replace("\n"," "))
-        if not msg:
+    async with httpx.AsyncClient(base_url=LLM_API_URL, headers=headers, timeout=timeout, transport=transport) as client:
+        last_err = None
+        for attempt in range(3):
             try:
-                logger.info("LLM RAW: %s", json.dumps(data, ensure_ascii=False)[:500])
-            except Exception:
-                pass
-            raise ValueError("LLM response missing content")
-        return msg
+                r = await client.post("/chat/completions", json=payload)
+                if r.status_code >= 400:
+                    r.raise_for_status()
+                data = r.json()
+                logger.info("LLM: http=%s model=%s choices_len=%s", r.status_code, data.get("model"), len(data.get("choices") or []))
+
+                # безопасный извлекатель контента
+                def _extract_content_safe(obj, max_depth: int = 6) -> str | None:
+                    seen = set()
+                    def _key(o):
+                        try: return id(o)
+                        except Exception: return None
+                    def _walk(o, depth: int) -> str | None:
+                        if depth < 0: return None
+                        kid = _key(o)
+                        if kid is not None:
+                            if kid in seen: return None
+                            seen.add(kid)
+                        if isinstance(o, dict):
+                            msg = o.get("message")
+                            if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+                                return msg["content"]
+                            if isinstance(msg, list) and msg:
+                                first = msg
+                                if isinstance(first, dict):
+                                    if isinstance(first.get("content"), str): return first["content"]
+                                    if isinstance(first.get("text"), str): return first["text"]
+                            if isinstance(o.get("content"), str): return o["content"]
+                            if isinstance(o.get("text"), str): return o["text"]
+                            msgs = o.get("messages")
+                            if isinstance(msgs, list) and msgs:
+                                got = _walk(msgs, depth - 1)
+                                if got: return got
+                            delta = o.get("delta")
+                            if isinstance(delta, dict) and isinstance(delta.get("content"), str):
+                                return delta["content"]
+                        if isinstance(o, list) and o:
+                            for i in range(min(len(o), 3)):
+                                got = _walk(o[i], depth - 1)
+                                if got: return got
+                        return None
+                    return _walk(obj, max_depth)
+
+                choices = data.get("choices") or []
+                msg = None
+                if isinstance(choices, list) and choices:
+                    msg = _extract_content_safe(choices)
+                if not msg and isinstance(data, dict):
+                    for k in ("content", "text"):
+                        if isinstance(data.get(k), str):
+                            msg = data[k]; break
+
+                logger.info("LLM: content head=%s", (msg or "")[:120].replace("\n"," "))
+                if not msg:
+                    try:
+                        logger.info("LLM RAW: %s", json.dumps(data, ensure_ascii=False)[:500])
+                    except Exception:
+                        pass
+                    raise ValueError("LLM response missing content")
+                return msg
+
+            except (ReadTimeout, TimeoutException) as e:
+                last_err = e
+                logger.warning("LLM: read timeout attempt %s: %s", attempt + 1, e)
+                await anyio.sleep(0.7 * (2 ** attempt))
+            except httpx.HTTPError as e:
+                last_err = e
+                logger.warning("LLM: HTTP error attempt %s: %s", attempt + 1, e)
+                await anyio.sleep(0.7 * (2 ** attempt))
+        # если все попытки не удались
+        raise last_err or ReadTimeout("LLM read timeout")
 
 # ====== PUBLIC ======
 async def plan_meeting(context: dict) -> PlanResponseV2:
@@ -331,7 +348,16 @@ async def plan_meeting(context: dict) -> PlanResponseV2:
         logger.info("LLM: parsed type=%s keys=%s", type(data).__name__, (list(data.keys())[:5] if isinstance(data, dict) else None))
         data = _coerce_plan(data)
         logger.info("LLM: after coerce appointments=%s", len(data.get("appointments", [])) if isinstance(data, dict) else None)
-        return PlanResponseV2(**data)
-    except (ValidationError, json.JSONDecodeError, AssertionError, KeyError, ValueError, httpx.HTTPStatusError) as e:
+        # Если даже после коэрса нет слотов — минимальная гарантия: вернём алгоритмический нейтральный слот
+        out = PlanResponseV2(**data)
+        if not out.appointments:
+            fb = _fallback(context)
+            if fb.appointments:
+                out.appointments = fb.appointments
+                out.need_clarification = fb.need_clarification
+                out.questions = fb.questions
+                out.constraints_used = out.constraints_used or [{"source": "fallback"}]
+        return out
+    except (ValidationError, json.JSONDecodeError, AssertionError, KeyError, ValueError, httpx.HTTPStatusError, ReadTimeout, TimeoutException) as e:
         logger.exception("LLM: fallback due to error: %s", e)
         return _fallback(context)
